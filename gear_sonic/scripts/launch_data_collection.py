@@ -116,6 +116,9 @@ class DataCollectionLaunchConfig:
     pico_manager: bool = True
     """Run pico_manager_thread_server with --manager flag."""
 
+    simple_manager: bool = False
+    """Use simplified PICO manager (pico_manager_simple.py) instead of the full manager."""
+
     pico_vis_vr3pt: bool = False
     """Enable VR 3-point visualization on the teleop streamer."""
 
@@ -293,6 +296,7 @@ def main(config: DataCollectionLaunchConfig):
     print(f"  Wrist cameras:   {'Yes' if config.record_wrist_cameras else 'No'}")
     print(f"  Text-to-speech:  {'Yes' if config.text_to_speech else 'No'}")
     print(f"  PICO vis:        vr3pt={config.pico_vis_vr3pt} smpl={config.pico_vis_smpl}")
+    print(f"  Simple manager:  {'Yes' if config.simple_manager else 'No'}")
     print(f"  PC IP (for PICO): {_get_local_ip()}")
     print("=" * 60)
 
@@ -350,13 +354,20 @@ def main(config: DataCollectionLaunchConfig):
         print("WARNING: C++ deploy pane may have failed to start.")
 
     # --- Pane 2 (bottom-left): PICO Teleop Streamer ---
-    pico_cmd = (
-        f"cd {repo_root} && "
-        f"source .venv_teleop/bin/activate && "
-        f"python gear_sonic/scripts/pico_manager_thread_server.py"
-    )
-    if config.pico_manager:
-        pico_cmd += " --manager"
+    if config.simple_manager:
+        pico_cmd = (
+            f"cd {repo_root} && "
+            f"source .venv_teleop/bin/activate && "
+            f"python gear_sonic/scripts/pico_manager_simple.py"
+        )
+    else:
+        pico_cmd = (
+            f"cd {repo_root} && "
+            f"source .venv_teleop/bin/activate && "
+            f"python gear_sonic/scripts/pico_manager_thread_server.py"
+        )
+        if config.pico_manager:
+            pico_cmd += " --manager"
     if config.pico_vis_vr3pt:
         pico_cmd += " --vis_vr3pt"
     if config.pico_vis_smpl:
