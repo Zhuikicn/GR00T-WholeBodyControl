@@ -77,6 +77,14 @@ namespace
         return std::string( prop.name );
     }
 
+    std::string GetTensorRTVersionString()
+    {
+        return std::to_string( NV_TENSORRT_MAJOR ) + "." +
+               std::to_string( NV_TENSORRT_MINOR ) + "." +
+               std::to_string( NV_TENSORRT_PATCH ) + "." +
+               std::to_string( NV_TENSORRT_BUILD );
+    }
+
     int SizeOfTensorDataType( nvinfer1::DataType dataType )
     {
         int size = -1;
@@ -135,6 +143,7 @@ bool ConvertONNXToTRT(
     // hash in the cuda device name and precision::
     trtHash = picosha2::hash256_hex_string(trtHash + GetCudaDeviceName( options.deviceID ));
     trtHash = picosha2::hash256_hex_string(trtHash + std::to_string(int(options.precision)));
+    trtHash = picosha2::hash256_hex_string(trtHash + GetTensorRTVersionString());
 
     // name of the tensorrt we're going to write to (same directory as the ONNX model):
     const auto filenamePos = onnxModelPath.find_last_of( '/' ) + 1;
@@ -152,7 +161,7 @@ bool ConvertONNXToTRT(
         file.read(const_cast<char*>(hashInFile.c_str()), trtHash.size());
 
         std::cerr << "hash value in file " <<  hashInFile << std::endl;
-        std::cerr << "hash of onnx/gpu type " << trtHash << std::endl;
+        std::cerr << "hash of onnx/gpu/tensorrt type " << trtHash << std::endl;
 
         if(hashInFile == trtHash)
         {

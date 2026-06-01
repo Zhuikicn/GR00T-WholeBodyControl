@@ -4,7 +4,9 @@
 # Source this file: source scripts/setup_env.sh
 
 echo "🔧 Setting up G1 Deploy environment..."
-
+source /home/humanoid/xuhang_code/.cu128.sh
+export HAS_ROS2=0
+echo "ℹ️  ROS2 disabled by setup_env.sh (HAS_ROS2=0)"
 SETUP_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_ROOT="$(cd "$SETUP_SCRIPT_DIR/.." && pwd)"
 
