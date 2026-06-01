@@ -1047,6 +1047,13 @@ class PlannerStreamer:
         """Called when entering planner mode. Resets state for fresh start."""
         self.yaw_accumulator.reset()
 
+    def seed_button_state(self):
+        """Seed prev_ab/prev_xy with current button state to prevent
+        spurious toggles on the first run_once() call after entering PLANNER mode."""
+        a, b, x, y = get_abxy_buttons()
+        self.prev_ab = bool(a) and bool(b)
+        self.prev_xy = bool(x) and bool(y)
+
     def recalibrate_for_vr3pt(self):
         """
         Recalibrate VR 3-point pose tracking using the robot's current measured joints.
@@ -1104,42 +1111,45 @@ class PlannerStreamer:
             # ---- Read axes for movement, facing, speed, and height ----
             lx, ly, rx, ry = get_controller_axes()
 
+            # In SQUAT mode, disable rx (facing control) — keep current facing unchanged
+            if self.mode == LocomotionMode.IDLE_SQUAT:
+                rx = 0.0
+
             # Facing from RIGHT stick rx: continuous yaw
             facing = self.yaw_accumulator.update(rx, self.dt)
 
-            # Movement from LEFT stick
-            raw_mag = np.hypot(lx, ly)
-            raw_mag = np.clip(raw_mag, 0.0, 1.0)
-            if np.abs(raw_mag) < JOYSTICK_DEADZONE:
-                mag = 0.0
-                speed = -1.0
-                mode_to_send = LocomotionMode.IDLE
-            else:
-                mag = (raw_mag - JOYSTICK_DEADZONE) / (1.0 - JOYSTICK_DEADZONE)
-                if mag > 1.0:
-                    mag = 1.0
-                mode_to_send = self.mode
-
-                if self.mode == LocomotionMode.SLOW_WALK:
-                    speed = 0.1 + 0.5 * mag  # 0.1 .. 0.6
-                else:
-                    speed = mag  # default 0 .. 1.0
-
-            denom = raw_mag if raw_mag > 0.0 else 1.0
-            scale = mag / denom
-            movement_local = np.array([-lx, ly]) * scale
-            perp_x, perp_y = -facing[1], facing[0]
-            rotation_facing = np.array([[perp_x, perp_y], [facing[0], facing[1]]])
-            movement_global = rotation_facing @ movement_local
-            movement = [movement_global[0], movement_global[1], 0.0]
+            mode_to_send = LocomotionMode.IDLE
+            movement = [0.0, 0.0, 0.0]
+            speed = -1.0
+            height = -1.0
 
             # ---- Height control (SQUAT mode only) ----
             if self.mode == LocomotionMode.IDLE_SQUAT:
-                self.height_accumulator += ry * 0.005
+                self.height_accumulator += ry * 0.02
                 self.height_accumulator = np.clip(self.height_accumulator, 0.2, 0.8)
                 height = self.height_accumulator
-            else:
-                height = -1.0  # use mode default
+
+            if self.mode == LocomotionMode.SLOW_WALK:
+                # Movement from LEFT stick applies only to SLOW_WALK.
+                raw_mag = np.hypot(lx, ly)
+                raw_mag = np.clip(raw_mag, 0.0, 1.0)
+                if np.abs(raw_mag) >= JOYSTICK_DEADZONE:
+                    mag = (raw_mag - JOYSTICK_DEADZONE) / (1.0 - JOYSTICK_DEADZONE)
+                    if mag > 1.0:
+                        mag = 1.0
+                    mode_to_send = LocomotionMode.SLOW_WALK
+                    speed = 0.1 + 0.5 * mag  # 0.1 .. 0.6
+
+                    denom = raw_mag if raw_mag > 0.0 else 1.0
+                    scale = mag / denom
+                    movement_local = np.array([-lx, ly]) * scale
+                    perp_x, perp_y = -facing[1], facing[0]
+                    rotation_facing = np.array([[perp_x, perp_y], [facing[0], facing[1]]])
+                    movement_global = rotation_facing @ movement_local
+                    movement = [movement_global[0], movement_global[1], 0.0]
+            elif self.mode == LocomotionMode.IDLE_SQUAT:
+                # Squat is a static height-controlled mode; ignore LEFT stick.
+                mode_to_send = LocomotionMode.IDLE_SQUAT
 
             # ---- Hand joints and VR 3-point data ----
             left_hand_position = None
@@ -1318,8 +1328,10 @@ def run_pico_manager_simple(
 
             # Handle mode transitions
             if new_mode != current_mode:
-                if new_mode == StreamMode.PLANNER and current_mode != StreamMode.PLANNER_VR_3PT:
+                if new_mode == StreamMode.PLANNER:
                     planner_streamer.reset_yaw()
+                    if current_mode == StreamMode.OFF:
+                        planner_streamer.seed_button_state()
                 elif new_mode == StreamMode.PLANNER_VR_3PT:
                     planner_streamer.recalibrate_for_vr3pt()
 
