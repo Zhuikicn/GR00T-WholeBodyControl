@@ -383,7 +383,11 @@ CHECKPOINT_ENCODER="${CHECKPOINT}_encoder.onnx"
 EXTRA_ARGS=""
 if [[ "$ENV_TYPE" == "sim" ]]; then
     EXTRA_ARGS="--disable-crc-check"
+    export HAS_ROS2="${HAS_ROS2:-0}"
     echo -e "${YELLOW}📋 Simulation mode: CRC check will be disabled${NC}"
+    if [[ "$HAS_ROS2" == "0" ]]; then
+        echo -e "${YELLOW}📋 Simulation mode: ROS2 build support disabled by default${NC}"
+    fi
     echo ""
 fi
 

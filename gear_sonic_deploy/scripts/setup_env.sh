@@ -5,6 +5,27 @@
 
 echo "🔧 Setting up G1 Deploy environment..."
 
+SETUP_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY_ROOT="$(cd "$SETUP_SCRIPT_DIR/.." && pwd)"
+
+prepend_ld_library_path() {
+    local path="$1"
+    if [ ! -d "$path" ]; then
+        return 0
+    fi
+
+    local filtered=""
+    local entry=""
+    IFS=':' read -ra ld_entries <<< "${LD_LIBRARY_PATH:-}"
+    for entry in "${ld_entries[@]}"; do
+        if [ -n "$entry" ] && [ "$entry" != "$path" ]; then
+            filtered="${filtered:+$filtered:}$entry"
+        fi
+    done
+
+    export LD_LIBRARY_PATH="$path${filtered:+:$filtered}"
+}
+
 # Run jetson_clocks on Jetson systems (bare-metal only)
 if command -v jetson_clocks &> /dev/null; then
     if [ -f "/.dockerenv" ]; then
@@ -19,6 +40,7 @@ fi
 
 # Detect system architecture for platform-specific setup
 ARCH=$(uname -m)
+UNITREE_DDS_LIB_DIR="$DEPLOY_ROOT/thirdparty/unitree_sdk2/thirdparty/lib/$ARCH"
 
 # Set up ONNX Runtime environment - check multiple possible locations
 ONNX_RUNTIME_PATHS=(
@@ -127,28 +149,32 @@ ROS2_FOUND=false
 ROS2_DISTROS=("jazzy" "iron" "humble" "galactic" "foxy" "eloquent" "dashing" "crystal")
 ROS2_INSTALL_PATHS=("/opt/ros" "/usr/local/ros" "$HOME/ros2_ws/install")
 
-for install_path in "${ROS2_INSTALL_PATHS[@]}"; do
-    if [ "$ROS2_FOUND" = true ]; then
-        break
-    fi
-    
-    for distro in "${ROS2_DISTROS[@]}"; do
-        ros2_setup_file="$install_path/$distro/setup.bash"
-        if [ -f "$ros2_setup_file" ]; then
-            source "$ros2_setup_file"
-            export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-            # Remove problematic system library path that conflicts with system GLIBC
-            export LD_LIBRARY_PATH=$(echo $LD_LIBRARY_PATH | tr ':' '\n' | grep -v "$SYSTEM_LIB_DIR" | tr '\n' ':' | sed 's/:$//')
-            echo "✅ ROS2 $distro found at $install_path/$distro - system manages all ROS2 dependencies"
-            export HAS_ROS2=1
-            export ROS_LOCALHOST_ONLY=1
-            ROS2_FOUND=true
+if [ "$HAS_ROS2" = "0" ]; then
+    echo "ℹ️  ROS2 disabled by HAS_ROS2=0"
+else
+    for install_path in "${ROS2_INSTALL_PATHS[@]}"; do
+        if [ "$ROS2_FOUND" = true ]; then
             break
         fi
+        
+        for distro in "${ROS2_DISTROS[@]}"; do
+            ros2_setup_file="$install_path/$distro/setup.bash"
+            if [ -f "$ros2_setup_file" ]; then
+                source "$ros2_setup_file"
+                export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+                # Remove problematic system library path that conflicts with system GLIBC
+                export LD_LIBRARY_PATH=$(echo $LD_LIBRARY_PATH | tr ':' '\n' | grep -v "$SYSTEM_LIB_DIR" | tr '\n' ':' | sed 's/:$//')
+                echo "✅ ROS2 $distro found at $install_path/$distro - system manages all ROS2 dependencies"
+                export HAS_ROS2=1
+                export ROS_LOCALHOST_ONLY=1
+                ROS2_FOUND=true
+                break
+            fi
+        done
     done
-done
+fi
 
-if [ "$ROS2_FOUND" = false ]; then
+if [ "$ROS2_FOUND" = false ] && [ "$HAS_ROS2" != "0" ]; then
     echo "⚠️  ROS2 not found in common locations:"
     printf "   %s/<distro>\n" "${ROS2_INSTALL_PATHS[@]}"
     echo "   Install ROS2 system-wide for ROS2InputHandler support"
@@ -301,6 +327,19 @@ if [ -d "/opt/onnxruntime/lib" ]; then
     export LD_LIBRARY_PATH="/opt/onnxruntime/lib:$LD_LIBRARY_PATH"
 fi
 
+# Unitree SDK2 is built against its bundled CycloneDDS runtime. Keep this path
+# ahead of ROS2 libraries, especially when ros-*-rmw-cyclonedds-cpp is installed.
+if [ -d "$UNITREE_DDS_LIB_DIR" ]; then
+    prepend_ld_library_path "$UNITREE_DDS_LIB_DIR"
+    echo "✅ Unitree SDK2 DDS libraries prioritized: $UNITREE_DDS_LIB_DIR"
+
+    if [ -n "$ROS_DISTRO" ] && [ -e "/opt/ros/$ROS_DISTRO/lib/libddsc.so.0" ]; then
+        echo "ℹ️  ROS2 CycloneDDS also detected; keeping Unitree DDS first to avoid ABI conflicts"
+    fi
+else
+    echo "⚠️  Unitree SDK2 DDS libraries not found at: $UNITREE_DDS_LIB_DIR"
+fi
+
 # Set up Git LFS (if not already done)
 if command -v git-lfs &> /dev/null; then
     git lfs install &> /dev/null
@@ -344,4 +383,3 @@ echo ""
 if [ -n "$BASH_VERSION" ]; then
     export PS1="(g1_deploy) $PS1"
 fi
-

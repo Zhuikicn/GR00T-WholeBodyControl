@@ -1,0 +1,3 @@
+1.如果本机安装了ROS2,ROS2选项开启的编译会打乱头文件，建议在set_env的时候禁用ROS
+2.如果本级安装了ROS2的cycloneDDS，动态库会首先加载了ROS2的DDS而不是项目内部的DDS,需要更高setup_env.sh提升
+必要时unset RMW_IMPLEMENTATION
