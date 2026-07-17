@@ -19,6 +19,8 @@ EGO_VIEW_HEIGHT: int = 480
 EGO_VIEW_WIDTH: int = 640
 WRIST_VIEW_HEIGHT: int = 480
 WRIST_VIEW_WIDTH: int = 640
+DEPTH_VIEW_HEIGHT: int = 480
+DEPTH_VIEW_WIDTH: int = 640
 FPS: int = 50
 
 
@@ -391,6 +393,26 @@ def get_wrist_camera_modality_config() -> dict:
         "video": {
             "left_wrist": {"original_key": "observation.images.left_wrist"},
             "right_wrist": {"original_key": "observation.images.right_wrist"},
+        },
+    }
+
+
+def get_depth_features() -> dict:
+    """Features for optional raw RealSense depth capture."""
+    return {
+        "observation.depth.ego_view": {
+            "dtype": "uint16",
+            "shape": (DEPTH_VIEW_HEIGHT, DEPTH_VIEW_WIDTH),
+            "names": ["height", "width"],
+        },
+    }
+
+
+def get_depth_modality_config() -> dict:
+    """Modality config entries for optional raw depth capture."""
+    return {
+        "depth": {
+            "ego_view": {"original_key": "observation.depth.ego_view"},
         },
     }
 

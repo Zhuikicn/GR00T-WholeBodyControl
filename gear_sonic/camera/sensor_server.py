@@ -106,10 +106,11 @@ class PoseMessageSchema:
 class ImageMessageSchema:
     """Standardized message schema for camera images.
 
-    Handles two encodings on the wire:
+    Handles three encodings on the wire:
 
     * **str** – legacy base64-encoded JPEG.
     * **bytes** – raw JPEG from on-device MJPEG encoder (e.g. OAK).
+    * **dict** – typed payloads such as PNG16 depth frames.
     """
 
     timestamps: dict[str, float]
@@ -120,6 +121,12 @@ class ImageMessageSchema:
         for key, image in self.images.items():
             if isinstance(image, bytes | bytearray):
                 serialized_msg["images"][key] = image
+            elif ImageUtils.is_depth_image(key, image):
+                serialized_msg["images"][key] = {
+                    "encoding": "png16",
+                    "dtype": "uint16",
+                    "data": ImageUtils.encode_depth_image(image),
+                }
             else:
                 serialized_msg["images"][key] = ImageUtils.encode_image(image)
         return serialized_msg
@@ -133,11 +140,21 @@ class ImageMessageSchema:
                 mat = cv2.imdecode(np.frombuffer(value, dtype=np.uint8), cv2.IMREAD_COLOR)
                 images[key] = mat[..., ::-1]  # BGR -> RGB
             elif isinstance(value, str):
-                images[key] = ImageUtils.decode_image(value)
+                if key.endswith("_depth"):
+                    images[key] = ImageUtils.decode_depth_image(value)
+                else:
+                    images[key] = ImageUtils.decode_image(value)
             elif isinstance(value, np.ndarray):
                 images[key] = value
-            elif isinstance(value, dict) and b"nd" in value:
-                images[key] = m.decode(value)
+            elif isinstance(value, dict):
+                encoding = value.get("encoding") or value.get(b"encoding")
+                if encoding == "png16" or encoding == b"png16":
+                    encoded = value.get("data") or value.get(b"data")
+                    images[key] = ImageUtils.decode_depth_image(encoded)
+                elif b"nd" in value or "nd" in value:
+                    images[key] = m.decode(value)
+                else:
+                    images[key] = value
             else:
                 images[key] = value
         return ImageMessageSchema(timestamps=timestamps, images=images)
@@ -221,13 +238,21 @@ class CameraMountPosition(Enum):
 
 class ImageUtils:
     @staticmethod
+    def is_depth_image(key: str, image: Any) -> bool:
+        return (
+            isinstance(image, np.ndarray)
+            and (key.endswith("_depth") or image.dtype == np.uint16)
+        )
+
+    @staticmethod
     def encode_image(image: np.ndarray) -> str:
         _, color_buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         return base64.b64encode(color_buffer).decode("utf-8")
 
     @staticmethod
     def encode_depth_image(image: np.ndarray) -> str:
-        depth_compressed = cv2.imencode(".png", image)[1].tobytes()
+        depth_image = np.ascontiguousarray(image, dtype=np.uint16)
+        depth_compressed = cv2.imencode(".png", depth_image)[1].tobytes()
         return base64.b64encode(depth_compressed).decode("utf-8")
 
     @staticmethod
@@ -237,7 +262,9 @@ class ImageUtils:
         return cv2.imdecode(color_array, cv2.IMREAD_COLOR)
 
     @staticmethod
-    def decode_depth_image(image: str) -> np.ndarray:
+    def decode_depth_image(image: str | bytes) -> np.ndarray:
+        if isinstance(image, bytes):
+            image = image.decode("utf-8")
         depth_data = base64.b64decode(image)
         depth_array = np.frombuffer(depth_data, dtype=np.uint8)
         return cv2.imdecode(depth_array, cv2.IMREAD_UNCHANGED)

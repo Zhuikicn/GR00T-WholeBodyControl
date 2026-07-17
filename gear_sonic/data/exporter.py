@@ -433,6 +433,8 @@ def hf_transform_to_torch_by_features(
             elif isinstance(features[key], datasets.Sequence):
                 assert isinstance(features[key].feature, datasets.Value)
                 dtype_str = features[key].feature.dtype
+            elif hasattr(features[key], "dtype"):
+                dtype_str = features[key].dtype
             else:
                 raise ValueError(f"Unsupported feature type for key '{key}': {features[key]}")
             dtype_mapping = {
@@ -440,10 +442,14 @@ def hf_transform_to_torch_by_features(
                 "float64": torch.float64,
                 "int32": torch.int32,
                 "int64": torch.int64,
+                "uint8": torch.uint8,
+                "uint16": getattr(torch, "uint16", torch.int32),
             }
             items_dict[key] = [
                 torch.tensor(x, dtype=dtype_mapping[dtype_str]) for x in items_dict[key]
             ]
+            if dtype_str == "uint16" and dtype_mapping[dtype_str] == torch.int32:
+                items_dict[key] = [item.to(torch.int32) for item in items_dict[key]]
     return items_dict
 
 

@@ -34,6 +34,30 @@ import tyro
 from gear_sonic.camera.composed_camera import ComposedCameraClientSensor
 
 
+def _to_display_bgr(name: str, img: np.ndarray) -> np.ndarray:
+    """Convert RGB or raw depth frames to a BGR preview image."""
+    if img.ndim == 2 or name.endswith("_depth"):
+        depth = np.asarray(img)
+        valid = depth[depth > 0]
+        if valid.size:
+            upper = np.percentile(valid, 95)
+            if upper <= 0:
+                upper = float(valid.max())
+        else:
+            upper = float(depth.max())
+        if upper <= 0:
+            preview = np.zeros(depth.shape[:2], dtype=np.uint8)
+        else:
+            preview = np.clip(depth.astype(np.float32) * (255.0 / upper), 0, 255).astype(
+                np.uint8
+            )
+        return cv2.applyColorMap(preview, cv2.COLORMAP_TURBO)
+
+    if img.ndim == 3 and img.shape[2] == 3:
+        return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    return img
+
+
 @dataclass
 class CameraViewerConfig:
     """CLI config for the ROS-free camera viewer."""
@@ -108,10 +132,7 @@ def main(config: CameraViewerConfig):
                 if img is None:
                     continue
 
-                if img.shape[2] == 3:
-                    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                else:
-                    img_bgr = img
+                img_bgr = _to_display_bgr(name, img)
 
                 if is_recording and name in video_writers:
                     video_writers[name].write(img_bgr)
@@ -170,7 +191,8 @@ def main(config: CameraViewerConfig):
                     for name in camera_names:
                         img = image_data["images"].get(name)
                         if img is not None:
-                            h, w = img.shape[:2]
+                            img_bgr = _to_display_bgr(name, img)
+                            h, w = img_bgr.shape[:2]
                             path = recording_dir / f"{name}.mp4"
                             video_writers[name] = cv2.VideoWriter(
                                 str(path), fourcc, config.fps, (w, h)

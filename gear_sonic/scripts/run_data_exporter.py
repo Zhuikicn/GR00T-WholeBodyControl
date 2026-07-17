@@ -32,6 +32,8 @@ import zmq
 
 from gear_sonic.data.exporter import Gr00tDataExporter
 from gear_sonic.data.features_sonic_vla import (
+    get_depth_features,
+    get_depth_modality_config,
     get_features_sonic_vla,
     get_g1_robot_model,
     get_modality_config_sonic_vla,
@@ -99,6 +101,9 @@ class SonicDataExporterConfig:
 
     record_wrist_cameras: bool = False
     """Record wrist camera streams (left_wrist, right_wrist). Requires cameras to be available."""
+
+    record_depth: bool = False
+    """Record raw RealSense ego-view depth as uint16 arrays in parquet."""
 
     text_to_speech: bool = True
     """Use text-to-speech voice feedback."""
@@ -227,12 +232,14 @@ class GrootDataCollector:
         sonic_data_zmq_port: int = 5556,
         state_zmq_host: str = "localhost",
         state_zmq_port: int = 5557,
+        record_depth: bool = False,
     ):
         self.text_to_speech = text_to_speech
         self.frequency = frequency
         self.loop_period = 1.0 / frequency
         self.data_exporter = data_exporter
         self.robot_model = robot_model
+        self.record_depth = record_depth
 
         self._episode_state = EpisodeState()
         self._keyboard_listener = ZMQKeyboardSubscriber()
@@ -537,6 +544,25 @@ class GrootDataCollector:
                     )
                 frame_data[feature_name] = images[image_key]
 
+    def _add_depth_to_frame_data(self, frame_data: dict) -> None:
+        if not self.record_depth:
+            return
+        if self.latest_image_msg is None:
+            return
+
+        depth_key = "ego_view_depth"
+        images = self.latest_image_msg["images"]
+        if depth_key not in images:
+            raise ValueError(
+                f"Required depth '{depth_key}' for feature 'observation.depth.ego_view' "
+                f"not found in image message. Available: {list(images.keys())}"
+            )
+
+        depth_image = np.asarray(images[depth_key], dtype=np.uint16)
+        if depth_image.ndim == 3 and depth_image.shape[-1] == 1:
+            depth_image = depth_image[..., 0]
+        frame_data["observation.depth.ego_view"] = np.ascontiguousarray(depth_image)
+
     def _finalize_frame(self, t_start: float) -> bool:
         t_end = time.monotonic()
         if t_end - t_start > (1 / self.frequency):
@@ -609,6 +635,7 @@ class GrootDataCollector:
         sonic_latency_ms = self._add_sonic_pose_features(frame_data)
 
         self._add_images_to_frame_data(frame_data)
+        self._add_depth_to_frame_data(frame_data)
 
         self._log_latency_periodic(sonic_latency_ms)
 
@@ -924,6 +951,16 @@ def main(config: SonicDataExporterConfig):
             else:
                 modality_config[key] = value
 
+    if config.record_depth:
+        print("[Camera] RealSense raw depth enabled — adding to dataset schema")
+        dataset_features.update(get_depth_features())
+        depth_modality = get_depth_modality_config()
+        for key, value in depth_modality.items():
+            if key in modality_config:
+                modality_config[key].update(value)
+            else:
+                modality_config[key] = value
+
     text_to_speech = TextToSpeech() if config.text_to_speech else None
 
     robot_config = poll_robot_config_zmq(
@@ -936,7 +973,11 @@ def main(config: SonicDataExporterConfig):
         features=dataset_features,
         modality_config=modality_config,
         task=config.task_prompt,
-        script_config={**robot_config, "record_wrist_cameras": config.record_wrist_cameras},
+        script_config={
+            **robot_config,
+            "record_wrist_cameras": config.record_wrist_cameras,
+            "record_depth": config.record_depth,
+        },
     )
 
     data_collector = GrootDataCollector(
@@ -950,6 +991,7 @@ def main(config: SonicDataExporterConfig):
         sonic_data_zmq_port=config.sonic_zmq_port,
         state_zmq_host=config.state_zmq_host,
         state_zmq_port=config.state_zmq_port,
+        record_depth=config.record_depth,
     )
     data_collector.run()
 

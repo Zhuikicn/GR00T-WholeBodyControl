@@ -105,8 +105,8 @@ class RealSenseSensor(Sensor, SensorServer):
             return None
 
         try:
-            color_image = np.asanyarray(color_frame.get_data())
-            depth_image = np.asanyarray(depth_frame.get_data())
+            color_image = np.ascontiguousarray(color_frame.get_data(), dtype=np.uint8)
+            depth_image = np.ascontiguousarray(depth_frame.get_data(), dtype=np.uint16)
         except Exception as e:
             print(f"ERROR! Failed to convert frames to numpy arrays: {e}")
             return None
