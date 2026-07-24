@@ -80,6 +80,8 @@ class RealSenseSensor(Sensor, SensorServer):
         except Exception as e:
             raise RuntimeError(f"Failed to start RealSense pipeline: {e}")
 
+        self.align_to_color = rs.align(rs.stream.color)
+        print("[RealSense] Depth-to-color alignment enabled")
         self._realsense_config = config
         self._run_as_server = run_as_server
         self.mount_position = mount_position
@@ -93,15 +95,16 @@ class RealSenseSensor(Sensor, SensorServer):
     def read(self) -> dict[str, Any] | None:
         try:
             frames = self.pipeline.wait_for_frames()
+            aligned_frames = self.align_to_color.process(frames)
         except Exception as e:
-            print(f"ERROR! Failed to wait for frames: {e}")
+            print(f"ERROR! Failed to acquire or align frames: {e}")
             return None
 
-        color_frame = frames.get_color_frame()
-        depth_frame = frames.get_depth_frame()
+        color_frame = aligned_frames.get_color_frame()
+        depth_frame = aligned_frames.get_depth_frame()
 
         if not color_frame or not depth_frame:
-            print("WARNING! No color or depth frame")
+            print("WARNING! No aligned color or depth frame")
             return None
 
         try:
@@ -113,6 +116,13 @@ class RealSenseSensor(Sensor, SensorServer):
 
         if color_image.size == 0 or depth_image.size == 0:
             print("WARNING! Empty color or depth image")
+            return None
+
+        if depth_image.shape != color_image.shape[:2]:
+            print(
+                f"ERROR! Aligned depth shape {depth_image.shape} does not match "
+                f"color shape {color_image.shape[:2]}"
+            )
             return None
 
         current_time = time.time()
