@@ -23,6 +23,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 import json
+from pathlib import Path
 import time
 
 import numpy as np
@@ -240,6 +241,7 @@ class GrootDataCollector:
         self.data_exporter = data_exporter
         self.robot_model = robot_model
         self.record_depth = record_depth
+        self._realsense_calibration_saved = False
 
         self._episode_state = EpisodeState()
         self._keyboard_listener = ZMQKeyboardSubscriber()
@@ -549,6 +551,16 @@ class GrootDataCollector:
             return
         if self.latest_image_msg is None:
             return
+
+        if not self._realsense_calibration_saved:
+            calibration = self.latest_image_msg["metadata"]["realsense_calibration"]
+            calibration_path = (
+                Path(self.data_exporter.meta.root) / "meta" / "realsense_calibration.json"
+            )
+            with open(calibration_path, "w") as f:
+                json.dump(calibration, f, indent=4)
+            self._realsense_calibration_saved = True
+            print(f"[Camera] Saved RealSense calibration to {calibration_path}")
 
         depth_key = "ego_view_depth"
         images = self.latest_image_msg["images"]
@@ -977,6 +989,10 @@ def main(config: SonicDataExporterConfig):
             **robot_config,
             "record_wrist_cameras": config.record_wrist_cameras,
             "record_depth": config.record_depth,
+            "depth_alignment": "raw_unaligned" if config.record_depth else None,
+            "realsense_calibration_file": (
+                "meta/realsense_calibration.json" if config.record_depth else None
+            ),
         },
     )
 

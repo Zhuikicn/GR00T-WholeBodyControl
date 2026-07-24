@@ -115,9 +115,14 @@ class ImageMessageSchema:
 
     timestamps: dict[str, float]
     images: dict[str, np.ndarray]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def serialize(self) -> dict[str, Any]:
-        serialized_msg: dict[str, Any] = {"timestamps": self.timestamps, "images": {}}
+        serialized_msg: dict[str, Any] = {
+            "timestamps": self.timestamps,
+            "images": {},
+            "metadata": self.metadata,
+        }
         for key, image in self.images.items():
             if isinstance(image, bytes | bytearray):
                 serialized_msg["images"][key] = image
@@ -134,6 +139,7 @@ class ImageMessageSchema:
     @staticmethod
     def deserialize(data: dict[str, Any]) -> "ImageMessageSchema":
         timestamps = data.get("timestamps", {})
+        metadata = data.get("metadata", {})
         images = {}
         for key, value in data.get("images", {}).items():
             if isinstance(value, bytes | bytearray):
@@ -157,10 +163,14 @@ class ImageMessageSchema:
                     images[key] = value
             else:
                 images[key] = value
-        return ImageMessageSchema(timestamps=timestamps, images=images)
+        return ImageMessageSchema(timestamps=timestamps, images=images, metadata=metadata)
 
     def asdict(self) -> dict[str, Any]:
-        return {"timestamps": self.timestamps, "images": self.images}
+        return {
+            "timestamps": self.timestamps,
+            "images": self.images,
+            "metadata": self.metadata,
+        }
 
 
 # =============================================================================
