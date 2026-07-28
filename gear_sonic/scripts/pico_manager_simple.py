@@ -426,28 +426,6 @@ def run_vr3pt_realtime_visualizer(update_hz: int = 10):
     finally:
         visualizer.close()
 
-def generate_finger_data(hand: str, trigger: float, grip: float) -> np.ndarray:
-    """
-    Generate finger position data from Pico controller button states.
-
-    Args:
-        hand: "left" or "right"
-        trigger: Trigger button value (0-1)
-        grip: Grip button value (0-1)
-
-    Returns:
-        Array of shape [25, 4, 4] representing fingertip positions
-    """
-    fingertips = np.zeros([25, 4, 4])
-
-    thumb = 0
-    middle = 10
-    # Control thumb based on shoulder button state (index 4 is thumb tip)
-    fingertips[4 + thumb, 0, 3] = 1.0  # open thumb
-    if trigger > 0.5:
-        fingertips[4 + middle, 0, 3] = 1.0  # close middle
-
-    return fingertips
 
 # Joystick deadzone threshold
 JOYSTICK_DEADZONE = 0.15
@@ -590,15 +568,13 @@ def get_abxy_buttons():
         return False, False, False, False
 
 
-def compute_hand_joints_from_inputs(
-    left_solver, right_solver, left_trigger, left_grip, right_trigger, right_grip
+def compute_hand_joints_from_triggers(
+    left_solver, right_solver, left_trigger, right_trigger
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute left/right hand joints using IK solvers, or zeros if unavailable."""
+    """Compute left/right hand joints from Pico trigger depth."""
     if left_solver is not None and right_solver is not None:
-        left_finger_data = generate_finger_data("left", left_trigger, left_grip)
-        right_finger_data = generate_finger_data("right", right_trigger, right_grip)
-        left_hand_joints = left_solver({"position": left_finger_data})
-        right_hand_joints = right_solver({"position": right_finger_data})
+        left_hand_joints = left_solver.retarget_from_trigger(left_trigger)
+        right_hand_joints = right_solver.retarget_from_trigger(right_trigger)
     else:
         left_hand_joints = np.zeros((1, 7), dtype=np.float32)
         right_hand_joints = np.zeros((1, 7), dtype=np.float32)
@@ -1165,7 +1141,7 @@ class PlannerStreamer:
                     vr_3pt_position = (vr_3pt_pose[:, :3].flatten()).tolist()
                     vr_3pt_orientation = vr_3pt_pose[:, 3:].flatten().tolist()
 
-                # Compute hand joints from trigger/grip inputs
+                # Compute hand joints from trigger inputs
                 (
                     left_menu_button,
                     left_trigger,
@@ -1173,13 +1149,11 @@ class PlannerStreamer:
                     left_grip,
                     right_grip,
                 ) = get_controller_inputs()
-                lh_joints, rh_joints = compute_hand_joints_from_inputs(
+                lh_joints, rh_joints = compute_hand_joints_from_triggers(
                     self.left_hand_ik_solver,
                     self.right_hand_ik_solver,
                     left_trigger,
-                    left_grip,
                     right_trigger,
-                    right_grip,
                 )
                 left_hand_position = lh_joints.reshape(-1).astype(np.float32).tolist()
                 right_hand_position = rh_joints.reshape(-1).astype(np.float32).tolist()

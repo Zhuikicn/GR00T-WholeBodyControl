@@ -9,6 +9,13 @@ closed pose.
 import numpy as np
 
 from gear_sonic.utils.teleop.solver.solver import Solver
+
+_PICO_TRIGGER_DEADZONE = 0.2
+_PICO_THUMB_0_NORMALIZED_TARGET = 0.73
+_DEX3_THUMB_0_MIN = -1.04719755
+_DEX3_THUMB_0_MAX = 1.04719755
+
+
 class G1GripperInverseKinematicsSolver(Solver):
     def __init__(self, side) -> None:
         self.side = "L" if side.lower() == "left" else "R"
@@ -89,6 +96,18 @@ class G1GripperInverseKinematicsSolver(Solver):
             q_closed = self._get_pinky_close_q_desired()
             q_desired = q_open + pinky_grip * (q_closed - q_open)
 
+        return q_desired
+
+    def retarget_from_trigger(self, trigger: float) -> np.ndarray:
+        """Map Pico trigger depth to a Dex3 middle-finger grasp target."""
+        close_ratio = 0.0
+        if trigger >= _PICO_TRIGGER_DEADZONE:
+            close_ratio = (trigger - _PICO_TRIGGER_DEADZONE) / (1.0 - _PICO_TRIGGER_DEADZONE)
+
+        q_desired = close_ratio * self._get_middle_close_q_desired()
+        q_desired[0] = _DEX3_THUMB_0_MIN + _PICO_THUMB_0_NORMALIZED_TARGET * (
+            _DEX3_THUMB_0_MAX - _DEX3_THUMB_0_MIN
+        )
         return q_desired
 
     def _get_index_close_q_desired(self):
