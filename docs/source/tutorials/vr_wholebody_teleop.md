@@ -2,6 +2,17 @@
 
 Full whole-body teleoperation using PICO VR headset and controllers. To teleop, use the option  `--input-type zmq_manager` during deployment. The `zmq_manager` input type switches between a **planner mode** (locomotion commands via ZMQ) and a **streamed motion mode** (full-body SMPL poses from PICO).
 
+## SONIC Low Latency
+
+The sequence below shows SONIC Low Latency running in whole-body teleoperation
+mode, including a successful ground pickup.
+
+```{image} ../_static/sonic_low_latency_demo.gif
+:alt: SONIC Low Latency whole-body teleoperation and ground pickup
+:width: 640px
+:align: center
+```
+
 ```{admonition} Isaac Teleop / CloudXR Scope
 :class: note
 The same `zmq_manager` workflow can also drive the headset through Isaac Teleop / CloudXR by launching `gear_sonic/scripts/pico_manager_thread_server.py --input-source isaac-teleop`. The streamer hosts the CloudXR runtime in-process via `isaacteleop[cloudxr]` — no separate publisher container required. That path is currently supported only for **G1 with a Thor backpack**; a regular G1 setup is not supported yet.
@@ -245,7 +256,7 @@ Below is the **recovery procedure** — if you accidentally enter a badly calibr
 | **Toggle POSE** | **A+X** | Switches between PLANNER ↔ POSE. OR from VR_3PT (entered via PLANNER) → POSE. |
 | **Toggle PLANNER_FROZEN_UPPER** | **B+Y** | Switches between POSE ↔ PLANNER_FROZEN_UPPER. OR from VR_3PT (entered via PLANNER_FROZEN_UPPER) → POSE. |
 | **Toggle VR_3PT** | **Left Stick Click** | From any Planner mode → VR_3PT (triggers CALIB). Click again to return. |
-| **Hand grasp** | **Trigger** (per hand) | Controls the corresponding hand's grasp. |
+| **Hand grasp** | **Trigger** (per hand) | The first 20% is a dead zone; the remaining travel controls the corresponding hand continuously from open to closed. |
 
 ### Joystick Controls (Planner Modes)
 
