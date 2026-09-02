@@ -121,8 +121,10 @@ class ZEDSensor(Sensor, SensorServer):
                 "fy": left.fy,
                 "ppx": left.cx,
                 "ppy": left.cy,
-                "distortion_model": str(left.disto),
-                "distortion_coefficients": list(left.disto),
+                # VIEW.LEFT is rectified by the SDK, so distortion must not be
+                # applied again downstream.
+                "distortion_model": "none",
+                "distortion_coefficients": [],
             },
             "depth_intrinsics": {
                 "width": self._rgb_width,
@@ -131,8 +133,8 @@ class ZEDSensor(Sensor, SensorServer):
                 "fy": left.fy,
                 "ppx": left.cx,
                 "ppy": left.cy,
-                "distortion_model": str(left.disto),
-                "distortion_coefficients": list(left.disto),
+                "distortion_model": "none",
+                "distortion_coefficients": [],
             },
         }
         print("[ZED] Publishing left RGB + depth (uint16 mm) with calibration metadata")
@@ -181,9 +183,11 @@ class ZEDSensor(Sensor, SensorServer):
         rgb = self._mat_rgb.get_data()
         depth = self._mat_depth.get_data()
 
-        # ZED returns BGRA (4 channels) by default — drop alpha
+        # ZED returns BGRA by default; the camera message contract is RGB.
         if rgb.ndim == 3 and rgb.shape[2] == 4:
-            rgb = rgb[:, :, :3]
+            rgb = rgb[:, :, :3][:, :, ::-1]
+        elif rgb.ndim == 3 and rgb.shape[2] == 3:
+            rgb = rgb[:, :, ::-1]
 
         # depth may be a * x 1 shape — squeeze to 2D
         if depth.ndim == 3 and depth.shape[2] == 1:
@@ -230,7 +234,7 @@ class ZEDSensor(Sensor, SensorServer):
                 "depth_image": gym.spaces.Box(
                     low=0,
                     high=65535,
-                    shape=(self._rgb_height, self._rgb_width, 1),
+                    shape=(self._rgb_height, self._rgb_width),
                     dtype=np.uint16,
                 ),
             }

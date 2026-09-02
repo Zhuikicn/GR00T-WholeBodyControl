@@ -398,7 +398,7 @@ def get_wrist_camera_modality_config() -> dict:
 
 
 def get_depth_features() -> dict:
-    """Features for optional raw RealSense depth capture."""
+    """Features for optional ego-view depth capture."""
     return {
         "observation.depth.ego_view": {
             "dtype": "uint16",

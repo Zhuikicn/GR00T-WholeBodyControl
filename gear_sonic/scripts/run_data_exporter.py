@@ -104,7 +104,7 @@ class SonicDataExporterConfig:
     """Record wrist camera streams (left_wrist, right_wrist). Requires cameras to be available."""
 
     record_depth: bool = False
-    """Record raw RealSense ego-view depth as uint16 arrays in parquet."""
+    """Record ego-view depth as uint16 arrays in parquet."""
 
     text_to_speech: bool = True
     """Use text-to-speech voice feedback."""
@@ -241,7 +241,7 @@ class GrootDataCollector:
         self.data_exporter = data_exporter
         self.robot_model = robot_model
         self.record_depth = record_depth
-        self._realsense_calibration_saved = False
+        self._depth_calibration_saved = False
 
         self._episode_state = EpisodeState()
         self._keyboard_listener = ZMQKeyboardSubscriber()
@@ -552,15 +552,31 @@ class GrootDataCollector:
         if self.latest_image_msg is None:
             return
 
-        if not self._realsense_calibration_saved:
-            calibration = self.latest_image_msg["metadata"]["realsense_calibration"]
-            calibration_path = (
-                Path(self.data_exporter.meta.root) / "meta" / "realsense_calibration.json"
-            )
+        if not self._depth_calibration_saved:
+            metadata = self.latest_image_msg["metadata"]
+            if "zed_calibration" in metadata:
+                camera_type = "zed"
+                depth_alignment = "left_camera_aligned"
+            else:
+                camera_type = "realsense"
+                depth_alignment = "raw_unaligned"
+
+            calibration_file = f"{camera_type}_calibration.json"
+            calibration = metadata[f"{camera_type}_calibration"]
+            calibration_path = Path(self.data_exporter.meta.root) / "meta" / calibration_file
             with open(calibration_path, "w") as f:
                 json.dump(calibration, f, indent=4)
-            self._realsense_calibration_saved = True
-            print(f"[Camera] Saved RealSense calibration to {calibration_path}")
+
+            script_config = self.data_exporter.meta.info["script_config"]
+            script_config.update(
+                {
+                    "depth_camera_type": camera_type,
+                    "depth_alignment": depth_alignment,
+                    "depth_calibration_file": f"meta/{calibration_file}",
+                }
+            )
+            self._depth_calibration_saved = True
+            print(f"[Camera] Saved {camera_type.upper()} calibration to {calibration_path}")
 
         depth_key = "ego_view_depth"
         images = self.latest_image_msg["images"]
@@ -964,7 +980,7 @@ def main(config: SonicDataExporterConfig):
                 modality_config[key] = value
 
     if config.record_depth:
-        print("[Camera] RealSense raw depth enabled — adding to dataset schema")
+        print("[Camera] Ego-view depth enabled — adding to dataset schema")
         dataset_features.update(get_depth_features())
         depth_modality = get_depth_modality_config()
         for key, value in depth_modality.items():
@@ -989,10 +1005,6 @@ def main(config: SonicDataExporterConfig):
             **robot_config,
             "record_wrist_cameras": config.record_wrist_cameras,
             "record_depth": config.record_depth,
-            "depth_alignment": "raw_unaligned" if config.record_depth else None,
-            "realsense_calibration_file": (
-                "meta/realsense_calibration.json" if config.record_depth else None
-            ),
         },
     )
 

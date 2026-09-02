@@ -146,7 +146,7 @@ class DataCollectionLaunchConfig:
     """Record wrist camera streams (left_wrist, right_wrist) in the dataset."""
 
     record_depth: bool = False
-    """Record raw RealSense ego-view depth in the dataset."""
+    """Record ego-view depth in the dataset."""
 
     text_to_speech: bool = True
     """Enable voice feedback via espeak (data exporter)."""
