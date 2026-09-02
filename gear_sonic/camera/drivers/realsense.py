@@ -76,12 +76,46 @@ class RealSenseSensor(Sensor, SensorServer):
                 rs.format.z16,
                 config.fps,
             )
-            self.pipeline.start(self.config)
+            self.pipeline_profile = self.pipeline.start(self.config)
         except Exception as e:
             raise RuntimeError(f"Failed to start RealSense pipeline: {e}")
 
-        self.align_to_color = rs.align(rs.stream.color)
-        print("[RealSense] Depth-to-color alignment enabled")
+        device = self.pipeline_profile.get_device()
+        color_profile = self.pipeline_profile.get_stream(
+            rs.stream.color
+        ).as_video_stream_profile()
+        depth_profile = self.pipeline_profile.get_stream(
+            rs.stream.depth
+        ).as_video_stream_profile()
+        color_intrinsics = color_profile.get_intrinsics()
+        depth_intrinsics = depth_profile.get_intrinsics()
+        depth_to_color = depth_profile.get_extrinsics_to(color_profile)
+
+        def intrinsics_to_dict(intrinsics):
+            return {
+                "width": intrinsics.width,
+                "height": intrinsics.height,
+                "fx": intrinsics.fx,
+                "fy": intrinsics.fy,
+                "ppx": intrinsics.ppx,
+                "ppy": intrinsics.ppy,
+                "distortion_model": str(intrinsics.model),
+                "distortion_coefficients": list(intrinsics.coeffs),
+            }
+
+        self.calibration = {
+            "schema_version": 1,
+            "camera_type": "realsense",
+            "serial_number": device.get_info(rs.camera_info.serial_number),
+            "color_intrinsics": intrinsics_to_dict(color_intrinsics),
+            "depth_intrinsics": intrinsics_to_dict(depth_intrinsics),
+            "depth_to_color_extrinsics": {
+                "rotation": list(depth_to_color.rotation),
+                "translation_meters": list(depth_to_color.translation),
+            },
+            "depth_scale_meters_per_unit": device.first_depth_sensor().get_depth_scale(),
+        }
+        print("[RealSense] Publishing raw unaligned RGB/depth with calibration metadata")
         self._realsense_config = config
         self._run_as_server = run_as_server
         self.mount_position = mount_position
@@ -95,16 +129,15 @@ class RealSenseSensor(Sensor, SensorServer):
     def read(self) -> dict[str, Any] | None:
         try:
             frames = self.pipeline.wait_for_frames()
-            aligned_frames = self.align_to_color.process(frames)
         except Exception as e:
-            print(f"ERROR! Failed to acquire or align frames: {e}")
+            print(f"ERROR! Failed to acquire frames: {e}")
             return None
 
-        color_frame = aligned_frames.get_color_frame()
-        depth_frame = aligned_frames.get_depth_frame()
+        color_frame = frames.get_color_frame()
+        depth_frame = frames.get_depth_frame()
 
         if not color_frame or not depth_frame:
-            print("WARNING! No aligned color or depth frame")
+            print("WARNING! No color or depth frame")
             return None
 
         try:
@@ -118,13 +151,6 @@ class RealSenseSensor(Sensor, SensorServer):
             print("WARNING! Empty color or depth image")
             return None
 
-        if depth_image.shape != color_image.shape[:2]:
-            print(
-                f"ERROR! Aligned depth shape {depth_image.shape} does not match "
-                f"color shape {color_image.shape[:2]}"
-            )
-            return None
-
         current_time = time.time()
         timestamps = {
             self.mount_position: current_time,
@@ -134,10 +160,18 @@ class RealSenseSensor(Sensor, SensorServer):
             self.mount_position: color_image,
             f"{self.mount_position}_depth": depth_image,
         }
-        return {"timestamps": timestamps, "images": images}
+        return {
+            "timestamps": timestamps,
+            "images": images,
+            "metadata": {"realsense_calibration": self.calibration},
+        }
 
     def serialize(self, data: dict[str, Any]) -> dict[str, Any]:
-        serialized_msg = ImageMessageSchema(timestamps=data["timestamps"], images=data["images"])
+        serialized_msg = ImageMessageSchema(
+            timestamps=data["timestamps"],
+            images=data["images"],
+            metadata=data["metadata"],
+        )
         return serialized_msg.serialize()
 
     def observation_space(self):
