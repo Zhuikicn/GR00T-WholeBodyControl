@@ -531,7 +531,12 @@ class BaseSimulator:
     """Base simulator class that handles initialization and running of simulations"""
 
     def __init__(
-        self, config: Dict[str, any], env_name: str = "default", redis_client=None, **kwargs
+        self,
+        config: Dict[str, any],
+        env_name: str = "default",
+        redis_client=None,
+        initialize_channel_factory: bool = True,
+        **kwargs,
     ):
         self.config = config
         self.env_name = env_name
@@ -559,13 +564,14 @@ class BaseSimulator:
                 f"Only 'default' is supported in this minimal build."
             )
 
-        try:
-            if self.config.get("INTERFACE", None):
-                ChannelFactoryInitialize(self.config["DOMAIN_ID"], self.config["INTERFACE"])
-            else:
-                ChannelFactoryInitialize(self.config["DOMAIN_ID"])
-        except Exception as e:
-            print(f"Note: Channel factory initialization attempt: {e}")
+        if initialize_channel_factory:
+            try:
+                if self.config.get("INTERFACE", None):
+                    ChannelFactoryInitialize(self.config["DOMAIN_ID"], self.config["INTERFACE"])
+                else:
+                    ChannelFactoryInitialize(self.config["DOMAIN_ID"])
+            except Exception as e:
+                print(f"Note: Channel factory initialization attempt: {e}")
 
         self.init_unitree_bridge()
         self.sim_env.set_unitree_bridge(self.unitree_bridge)
