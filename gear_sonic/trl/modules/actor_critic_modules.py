@@ -188,6 +188,14 @@ class Actor(nn.Module):
             std = torch.clamp(std, min=1e-6)
             return std
         else:
+            # Clamp the effective distribution without mutating frozen parameters.
+            if self.algo_config.get("freeze_noise_std", False):
+                std = self.std
+                if self.algo_config.get("use_clampped_std", False):
+                    std = std.clamp(self.algo_config.std_clamp_min, self.algo_config.std_clamp_max)
+                if self.clamp_noise_std:
+                    std = std.clamp(max=self.max_noise_std)
+                return std
             # Original std parameterization with in-place clamping
             if self.algo_config.get("use_clampped_std", False):
                 with torch.no_grad():

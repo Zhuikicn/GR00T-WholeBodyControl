@@ -278,8 +278,9 @@ class BaseModule(nn.Module):
     def _build_mlp_layer(self, layer_config):
         """Build a plain MLP with configurable hidden dims and activation.
 
-        Architecture: ``input -> [hidden_i -> Act]* -> output``. No residual
-        connections or normalization (use ``ResidualMLP`` for those).
+        Architecture: ``input -> [hidden_i -> Act]* -> output`` with optional
+        output LayerNorm. ``zero_init_output_norm`` starts an additive branch
+        at zero while retaining gradients through the normalization parameters.
 
         Args:
             layer_config: Dict with ``"hidden_dims"`` (list of ints) and
@@ -299,6 +300,13 @@ class BaseModule(nn.Module):
             else:
                 layers.append(nn.Linear(hidden_dims[l], hidden_dims[l + 1]))
                 layers.append(activation)
+
+        if layer_config.get("output_layer_norm", False):
+            norm = nn.LayerNorm(output_dim)
+            if layer_config.get("zero_init_output_norm", False):
+                nn.init.zeros_(norm.weight)
+                nn.init.zeros_(norm.bias)
+            layers.append(norm)
 
         self.module = nn.Sequential(*layers)
 

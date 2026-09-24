@@ -95,6 +95,7 @@ class UniversalTokenModule(nn.Module):
         optimize_encoders_ratio_for_CHIP=False,  # CHIP compliance training optimization
         active_encoders=None,  # Optional list of encoder names to activate (None = all)
         active_decoders=None,  # Optional list of decoder names to activate (None = all)
+        dt_future_ref_frames=0.1,
         **kwargs,  # noqa: ARG002
     ):
         """Initialise encoders, FSQ quantizer, decoders, and auxiliary losses.
@@ -119,11 +120,14 @@ class UniversalTokenModule(nn.Module):
             down_t: Temporal downsampling factor for token count derivation.
             num_future_frames: Number of future motion frames in the tokenizer
                 input window.
+            dt_future_ref_frames: Reference-frame spacing in seconds, used in export metadata.
             quantizer: Hydra-instantiable config for the FSQ quantizer.
                 ``None`` disables quantization (identity passthrough).
             encoders: Dict of encoder configs (Hydra DictConfig).  Each entry
                 specifies ``inputs``, ``outputs``, ``params``, and optional
                 ``additive_to`` / ``sub_encoders`` / ``mask`` / ``freeze``.
+                ``condition_on_base_latent`` prepends the flattened original
+                encoder latent to an additive encoder's flattened observations.
             decoders: Dict of decoder configs (Hydra DictConfig).  Each entry
                 specifies ``inputs``, ``outputs``, ``conds``, ``params``, and
                 ``has_temporal_dim``.
@@ -213,6 +217,7 @@ class UniversalTokenModule(nn.Module):
         self.module_dim_dict = module_dim_dict
         self.proprioception_features = proprioception_features
         self.num_future_frames = num_future_frames
+        self.dt_future_ref_frames = dt_future_ref_frames
 
         # Initialize auxiliary loss functions (nn.ModuleDict so sub-module buffers
         # are part of the model state_dict and visible to DDP)
@@ -285,6 +290,10 @@ class UniversalTokenModule(nn.Module):
             input_features = encoder_config.get("inputs", [])
             output_features = encoder_config.get("outputs", [])
             input_feature_dim = sum([self.tokenizer_obs_dims[key][-1] for key in input_features])
+            if encoder_config.get("condition_on_base_latent", False):
+                input_feature_dim = self.token_total_dim + sum(
+                    int(np.prod(self.tokenizer_obs_dims[key])) for key in input_features
+                )
             if len(output_features) > 0:
                 output_feature_dim = sum(
                     [self.tokenizer_obs_dims[key][-1] for key in output_features]
@@ -579,11 +588,23 @@ class UniversalTokenModule(nn.Module):
             device=first_token.device,
         )
         for encoder_name in encoded_tokens.keys():
-            all_tokens[encoder_masks[encoder_name]] = encoded_tokens[encoder_name]
+            # FSQ can preserve bf16 for empty modality batches under autocast.
+            all_tokens[encoder_masks[encoder_name]] = encoded_tokens[encoder_name].to(
+                all_tokens.dtype
+            )
         all_tokens = all_tokens.view(batch_size, seq_len, *all_tokens.shape[1:])
         return all_tokens
 
-    def _encode_single(self, encoder_name, tokenizer_obs, encoder_mask=None, frame_mask=None):
+    def get_encoder_input_features(self, encoder_name):
+        """Ordered inputs needed by an encoder and its additive branches."""
+        names = [encoder_name, *self.additive_encoders.get(encoder_name, [])]
+        return list(
+            dict.fromkeys(feature for name in names for feature in self.encoder_input_features[name])
+        )
+
+    def _encode_single(
+        self, encoder_name, tokenizer_obs, encoder_mask=None, frame_mask=None, base_latent=None
+    ):
         """Encode using a single encoder without quantization or additive composition.
         This is the core encoding logic used by both regular and additive encoders.
 
@@ -592,6 +613,8 @@ class UniversalTokenModule(nn.Module):
             tokenizer_obs: Dictionary of tokenizer observations
             encoder_mask: Optional mask for selecting specific samples
             frame_mask: Optional [B*seq, max_frames] bool mask for variable frame support
+            base_latent: Already masked original pre-quantization latent to
+                prepend to the flattened observations of an additive encoder.
 
         Returns:
             latent: The encoded latent representation
@@ -646,6 +669,11 @@ class UniversalTokenModule(nn.Module):
         elif frame_mask is not None:
             frame_mask_enc = frame_mask
 
+        if base_latent is not None:
+            encoder_input = torch.cat(
+                (base_latent.flatten(start_dim=1), encoder_input.flatten(start_dim=1)), dim=-1
+            )
+
         # encode using the provided encoder (with gradients enabled for end-to-end training)
         if encoder is not None:
             if frame_mask_enc is not None and self.encoder_mask_features.get(encoder_name):
@@ -676,15 +704,26 @@ class UniversalTokenModule(nn.Module):
             Otherwise: (encoded_tokens, latent) tuple
         """
         # Get base encoder latent
-        latent = self._encode_single(
+        base_latent = self._encode_single(
             encoder_name, tokenizer_obs, encoder_mask, frame_mask=frame_mask
         )
+        latent = base_latent
 
         # Add contributions from additive encoders
         if encoder_name in self.additive_encoders:
             for additive_encoder_name in self.additive_encoders[encoder_name]:
                 additive_latent = self._encode_single(
-                    additive_encoder_name, tokenizer_obs, encoder_mask, frame_mask=frame_mask
+                    additive_encoder_name,
+                    tokenizer_obs,
+                    encoder_mask,
+                    frame_mask=frame_mask,
+                    base_latent=(
+                        base_latent
+                        if self.encoders_cfg[additive_encoder_name].get(
+                            "condition_on_base_latent", False
+                        )
+                        else None
+                    ),
                 )
                 latent = latent + additive_latent
 

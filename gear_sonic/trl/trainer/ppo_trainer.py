@@ -2195,11 +2195,34 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
 
         # Load model state
         model = self.accelerator.unwrap_model(self.model)
-        if "actor_model_state_dict" in checkpoint:
+        new_actor_modules = self.config.get("checkpoint_new_actor_modules", [])
+        if new_actor_modules:
+            policy_state = dict(
+                checkpoint["actor_model_state_dict"]
+                if "actor_model_state_dict" in checkpoint
+                else checkpoint["policy_state_dict"]
+            )
+            if not resume:
+                for module_name in new_actor_modules:
+                    prefix = module_name + "."
+                    if not any(key.startswith(prefix) for key in policy_state):
+                        policy_state.update(
+                            (key, value)
+                            for key, value in model.policy.state_dict().items()
+                            if key.startswith(prefix)
+                        )
+            # Original parameters and partially present branches must match exactly.
+            model.policy.load_state_dict(policy_state, strict=True)
+            model.value_model.load_state_dict(checkpoint["value_state_dict"], strict=True)
+        elif "actor_model_state_dict" in checkpoint:
             model.policy.load_state_dict(checkpoint["actor_model_state_dict"])
         elif "policy_state_dict" in checkpoint:
             model.policy.load_state_dict(checkpoint["policy_state_dict"], strict=False)
-        if "value_state_dict" in checkpoint and model.value_model is not None:
+        if (
+            not new_actor_modules
+            and "value_state_dict" in checkpoint
+            and model.value_model is not None
+        ):
             model.value_model.load_state_dict(checkpoint["value_state_dict"])
 
         if resume:

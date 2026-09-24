@@ -335,6 +335,13 @@ accelerate launch --num_processes=8 gear_sonic/train_agent_trl.py \
 Adaptive sampling is enabled by default and attributes failures to the motion
 cursor tracked before environment reset.
 
+For offline trajectory tracking with privileged root pose, use
+`+exp=manager/universal_token/all_modes/sonic_v1_1_root_tracking`.
+The experiment trains a 10-frame root-trajectory residual encoder and critic
+with the original v1.1 actor frozen. See the
+[root tracking guide](docs/source/user_guide/root_tracking.md) for checkpoint
+setup, training, paired evaluation and ONNX input layouts.
+
 For the full guide including multi-node training, evaluation, ONNX export, and SOMA encoder setup:
 📖 [Installation (Training)](https://nvlabs.github.io/GR00T-WholeBodyControl/getting_started/installation_training.html) |
 [Training Guide](https://nvlabs.github.io/GR00T-WholeBodyControl/user_guide/training.html)

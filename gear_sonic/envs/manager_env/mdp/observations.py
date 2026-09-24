@@ -383,6 +383,7 @@ class TokenizerCfg(ObsGroup):
     command_multi_future_root_transforms = None
     command_multi_future_root_transforms_nonflat = None
     motion_anchor_ori_heading_mf_nonflat = None
+    motion_root_trajectory_heading = None
     motion_anchor_ori_refheading_mf_nonflat = None
     heading_diff_robot_ref = None
     motion_anchor_ori_refheading = None
@@ -1148,6 +1149,27 @@ def command_multi_future_root_transforms(
         return transforms.reshape(env.num_envs, command.num_future_frames, -1)
     else:
         return transforms.reshape(env.num_envs, -1)
+
+
+def motion_root_trajectory_heading(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    """Reference pelvis poses relative to the measured pelvis and its heading.
+
+    Returns [N, F, 9], ordered as XYZ displacement followed by the first two
+    rotation-matrix columns flattened in row-major order. The shared motion
+    command supplies the same time indices and endpoint padding as G1 targets.
+    """
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    positions = command.anchor_pos_w_multi_future.reshape(env.num_envs, -1, 3)
+    orientations = command.anchor_quat_w_multi_future.reshape(env.num_envs, -1, 4)
+    robot_position = command.robot.data.body_pos_w[:, command.robot_anchor_body_index]
+    robot_orientation = command.robot.data.body_quat_w[:, command.robot_anchor_body_index]
+    heading_inv = quat_inv(torch_transform.get_heading_q(robot_orientation))[:, None, :]
+    heading_inv = heading_inv.expand_as(orientations)
+    relative_position = quat_apply(heading_inv, positions - robot_position[:, None, :])
+    relative_rotation = matrix_from_quat(quat_mul(heading_inv, orientations))
+    return torch.cat(
+        (relative_position, relative_rotation[..., :2].reshape(env.num_envs, -1, 6)), dim=-1
+    )
 
 
 def motion_anchor_ori_heading_mf(

@@ -209,6 +209,7 @@ teleop_vids/
 data/
 bones_seed_smpl/
 sonic_release/
+sonic_v1_1/
 # Training output logs
 logs_rl/
 logs_eval/

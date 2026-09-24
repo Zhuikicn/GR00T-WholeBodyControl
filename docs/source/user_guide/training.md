@@ -18,6 +18,11 @@ All encoders project into a shared latent token space via FSQ (Finite Scalar
 Quantization), and a single decoder produces joint actions regardless of input
 modality. Training uses PPO with auxiliary losses in Isaac Lab simulation.
 
+For offline G1 tracking with measured global root pose, see
+[Privileged root-trajectory tracking](root_tracking.md). Its
+`sonic_v1_1_root_tracking` experiment trains a root-trajectory residual branch
+and critic while keeping the original v1.1 actor frozen.
+
 | Config | Encoders | Use case |
 |--------|----------|----------|
 | `sonic_release` | G1, teleop, SMPL | **Default** — matches the released checkpoint |

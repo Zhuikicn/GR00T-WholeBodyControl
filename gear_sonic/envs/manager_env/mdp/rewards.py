@@ -29,6 +29,7 @@ class RewardsCfg:
     """Reward terms for the MDP."""
 
     tracking_anchor_pos = None
+    tracking_anchor_xy = None
     tracking_anchor_ori = None
     tracking_relative_body_pos = None
     tracking_relative_body_ori = None
@@ -58,7 +59,7 @@ class RewardsCfg:
 
 
 def tracking_anchor_pos_error(
-    env: ManagerBasedRLEnv, command_name: str, std: float
+    env: ManagerBasedRLEnv, command_name: str, std: float, xy_only: bool = False
 ) -> torch.Tensor:
     """Compute anchor position tracking reward using a Gaussian kernel.
 
@@ -69,12 +70,15 @@ def tracking_anchor_pos_error(
         command_name: Name of the tracking command term.
         std: Standard deviation for the Gaussian kernel. Smaller values produce
             sharper falloff and stricter tracking.
+        xy_only: Compute horizontal displacement only.
 
     Returns:
         Reward tensor of shape (num_envs,) in [0, 1].
     """
     command: TrackingCommand = env.command_manager.get_term(command_name)
     diff = command.anchor_pos_w - command.robot_anchor_pos_w
+    if xy_only:
+        diff = diff[..., :2]
     sq_dist = (diff * diff).sum(dim=-1)
     return torch.exp(-sq_dist / (std * std))
 

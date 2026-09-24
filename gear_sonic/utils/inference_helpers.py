@@ -8,10 +8,37 @@ Focuses on SONIC / universal-token model export:
 """
 
 import copy
+import json
+import math
 import os
+from pathlib import Path
 
 import torch
 from torch import nn
+
+
+def _write_input_layout(full_path, features, module):
+    """Save exact flattened input offsets next to an exported ONNX graph."""
+    offset = 0
+    fields = []
+    for name, shape in features:
+        size = math.prod(shape)
+        fields.append({"name": name, "shape": list(shape), "start": offset, "end": offset + size})
+        offset += size
+    layout = {"input_name": "obs_dict", "input_dim": offset, "fields": fields}
+    if any(name == "motion_root_trajectory_heading" for name, _ in features):
+        layout["root_trajectory"] = {
+            "body": "pelvis",
+            "time_offsets_s": [
+                i * module.dt_future_ref_frames for i in range(module.num_future_frames)
+            ],
+            "position": "R_heading(actual)^T * (p_reference_world - p_actual_world), metres",
+            "orientation": "R_heading(actual)^T * R_reference_world",
+            "rotation_6d_order": ["R00", "R01", "R10", "R11", "R20", "R21"],
+            "flatten_order": "time-major: [dx,dy,dz,R00,R01,R10,R11,R20,R21] per frame",
+            "endpoint_padding": "repeat last reference frame",
+        }
+    Path(full_path).with_suffix(".input.json").write_text(json.dumps(layout, indent=2) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +115,7 @@ def export_universal_token_module_as_onnx(
     module.eval()
 
     # Determine which tokenizer observations are needed (union of encoder and decoder inputs)
-    encoder_input_features = module.encoder_input_features[encoder_name]
+    encoder_input_features = module.get_encoder_input_features(encoder_name)
     decoder_input_features = module.decoder_input_features[decoder_name]
 
     special_keys = {"token", "token_flattened", "proprioception", "action", "meta_action"}
@@ -146,7 +173,7 @@ def export_universal_token_module_as_onnx(
                 index += feature_size
 
             # Get encoder-specific observations
-            encoder_input_features = self.module.encoder_input_features[self.encoder_name]
+            encoder_input_features = self.module.get_encoder_input_features(self.encoder_name)
             encoder_tokenizer_obs = {
                 k: tokenizer_obs[k] for k in encoder_input_features if k in tokenizer_obs
             }
@@ -187,6 +214,12 @@ def export_universal_token_module_as_onnx(
             opset_version=13,
         )
 
+    _write_input_layout(
+        full_path,
+        [(name, module.tokenizer_obs_dims[name]) for name in required_tokenizer_obs]
+        + [("proprioception", (proprioception_dim,))],
+        module,
+    )
     print(f"\nExported ONNX model: {encoder_name} encoder -> {decoder_name} decoder")  # noqa: T201
     print(f"Saved to: {full_path}")  # noqa: T201
     print(f"Required tokenizer observations: {required_tokenizer_obs}")  # noqa: T201
@@ -235,7 +268,7 @@ def export_universal_token_encoders_as_onnx(
 
     features_needed = set()
     for enc_name in encoder_names:
-        encoder_input_features = module.encoder_input_features[enc_name]
+        encoder_input_features = module.get_encoder_input_features(enc_name)
         features_needed.update([f for f in encoder_input_features if f not in special_keys])
 
     for obs_name in module.tokenizer_obs_names:
@@ -286,7 +319,7 @@ def export_universal_token_encoders_as_onnx(
 
             all_encoded_tokens = []
             for encoder_name in self.encoder_names:
-                encoder_input_features = self.module.encoder_input_features[encoder_name]
+                encoder_input_features = self.module.get_encoder_input_features(encoder_name)
                 encoder_tokenizer_obs = {
                     k: tokenizer_obs[k] for k in encoder_input_features if k in tokenizer_obs
                 }
@@ -325,6 +358,12 @@ def export_universal_token_encoders_as_onnx(
             opset_version=13,
         )
 
+    _write_input_layout(
+        full_path,
+        [("encoder_selector", (1,))]
+        + [(name, module.tokenizer_obs_dims[name]) for name in required_tokenizer_obs],
+        module,
+    )
     print(  # noqa: T201
         f"\nExported ENCODERS ONLY ONNX model with {len(encoder_names)} encoders: {encoder_names}"
     )
@@ -458,6 +497,13 @@ def export_universal_token_decoder_as_onnx(
             opset_version=13,
         )
 
+    _write_input_layout(
+        full_path,
+        [("token", (token_total_dim,))]
+        + [(name, module.tokenizer_obs_dims[name]) for name in required_tokenizer_obs]
+        + [("proprioception", (proprioception_dim,))],
+        module,
+    )
     print(f"\nExported DECODER ONLY ONNX model with decoder: {decoder_name}")  # noqa: T201
     print(f"Saved to: {full_path}")  # noqa: T201
     print(f"Required tokenizer observations: {required_tokenizer_obs}")  # noqa: T201

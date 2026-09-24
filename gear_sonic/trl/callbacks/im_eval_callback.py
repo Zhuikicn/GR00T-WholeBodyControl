@@ -108,7 +108,9 @@ class ImEvalCallback(TrainerCallback):
     """Callback to evaluate motion imtiation during training. Supports multigpu ."""
 
     def __init__(
-        self, eval_frequency, empty_cache_freq=20, eval_only=False, output_dir=None, log_keys=None
+        self, eval_frequency, empty_cache_freq=20, eval_only=False, output_dir=None, log_keys=None,
+        root_tracking_metrics=False, root_tracking_push_step=None,
+        root_tracking_push_velocity=(0.0, 0.3, 0.0),
     ):
         super().__init__()
         self.eval_frequency = eval_frequency
@@ -119,6 +121,9 @@ class ImEvalCallback(TrainerCallback):
         self.render_only = False
         self.log_keys = log_keys
         self._has_object = False
+        self.root_tracking_metrics = root_tracking_metrics
+        self.root_tracking_push_step = root_tracking_push_step
+        self.root_tracking_push_velocity = root_tracking_push_velocity
 
     def on_step_end(self, args, state, control, **kwargs):
 
@@ -231,6 +236,33 @@ class ImEvalCallback(TrainerCallback):
             metrics_eval["failed_keys"] = eval_res["failed_keys"]
             metrics_eval["failed_idxes"] = eval_res["failed_idxes"]
 
+        if self.root_tracking_metrics:
+            rows = self.accelerator.gather(torch.cat(self.root_tracking_batches))
+            rows = rows[rows[:, -1].argsort()][:self.env._motion_lib._num_unique_motions]
+            counts = rows[:, 3].clamp_min(1)
+            names = ["root_xy_rmse_m", "root_yaw_rmse_rad", "joint_rmse_rad"]
+            for index, name in enumerate(names):
+                metrics_eval[f"eval/root_tracking/{name}"] = (
+                    rows[:, index].sum() / counts.sum()
+                ).sqrt().item()
+                metrics_eval["eval/all_metrics_dict"][name] = (
+                    rows[:, index] / counts
+                ).sqrt().cpu().numpy()
+            completed = ~rows[:, 6].bool()
+            endpoints = rows[:, 4].cpu().tolist()
+            metrics_eval["eval/root_tracking/endpoint_xy_m_completed"] = (
+                rows[completed, 4].mean().item() if completed.any() else None
+            )
+            metrics_eval["eval/all_metrics_dict"]["endpoint_xy_m_completed"] = [
+                distance if success else None
+                for distance, success in zip(endpoints, completed.cpu().tolist())
+            ]
+            metrics_eval["eval/all_metrics_dict"]["last_valid_xy_m"] = endpoints
+            metrics_eval["eval/root_tracking/observed_fall_rate"] = rows[:, 5].mean().item()
+            metrics_eval["eval/root_tracking/early_termination_rate"] = rows[:, 6].mean().item()
+            metrics_eval["eval/root_tracking/push_step"] = self.root_tracking_push_step
+            metrics_eval["eval/root_tracking/push_velocity_mps"] = list(self.root_tracking_push_velocity)
+
         return metrics_eval
 
     def _get_inference_policy(self, device=None):
@@ -289,6 +321,7 @@ class ImEvalCallback(TrainerCallback):
         self.pred_rot, self.pred_rot_all = [], []
         self.sampled_motion_idx = []
         self.time_eval_start = time.time()
+        self.root_tracking_batches = []
 
         # Object tracking metrics
         self._has_object = (
@@ -325,6 +358,43 @@ class ImEvalCallback(TrainerCallback):
             pass
 
     def env_step(self, actor_state):
+        if self.root_tracking_metrics:
+            from isaaclab.utils.math import matrix_from_quat
+
+            command = self.env.motion_command
+            if self.curr_steps == 0:
+                # XY/yaw/joint squared-error sums, count, last XY error, observed fall.
+                self.root_tracking_accumulator = torch.zeros(
+                    (self.env.num_envs, 6), device=self.env.device
+                )
+            active = ~self.terminate_state.bool() & (
+                self.curr_steps < self.env._motion_lib.get_motion_num_steps(self.env.motion_ids)
+            )
+            if self.curr_steps == self.root_tracking_push_step:
+                ids = active.nonzero().flatten()
+                velocity = command.robot.data.root_vel_w[ids].clone()
+                velocity[:, :3] += velocity.new_tensor(self.root_tracking_push_velocity)
+                command.robot.write_root_velocity_to_sim(velocity, env_ids=ids)
+            position = command.robot_anchor_pos_w
+            actual_rotation = matrix_from_quat(command.robot_anchor_quat_w)
+            target_rotation = matrix_from_quat(command.anchor_quat_w)
+            yaw_error = torch.atan2(target_rotation[:, 1, 0], target_rotation[:, 0, 0]) - torch.atan2(
+                actual_rotation[:, 1, 0], actual_rotation[:, 0, 0]
+            )
+            yaw_error = torch.atan2(yaw_error.sin(), yaw_error.cos())
+            xy_squared = (position[:, :2] - command.anchor_pos_w[:, :2]).square().sum(-1)
+            actual_joints = command.robot_joint_pos
+            if command.has_dof_mismatch:
+                actual_joints = actual_joints[:, command.body_joint_indices]
+            joint_squared = (actual_joints - command.joint_pos).square().mean(-1)
+            errors = torch.stack((xy_squared, yaw_error.square(), joint_squared), dim=-1)
+            acc = self.root_tracking_accumulator
+            acc[active, :3] += errors[active]
+            acc[active, 3] += 1
+            acc[active, 4] = xy_squared[active].sqrt()
+            height = position[:, 2] - self.env.env.scene.env_origins[:, 2]
+            fallen = (height < 0.25) | (actual_rotation[:, 2, 2] < 0.5)
+            acc[active, 5] = torch.maximum(acc[active, 5], fallen[active].float())
         obs_dict, rewards, dones, extras = self.env.step(actor_state)
         actor_state.update({"obs": obs_dict, "rewards": rewards, "dones": dones, "extras": extras})
         return actor_state
@@ -496,6 +566,12 @@ class ImEvalCallback(TrainerCallback):
                 self.obj_ori_error_all.append(per_env_obj_ori_err)
 
             env_motion_ids = self.env.start_idx + self.env.motion_ids
+            if self.root_tracking_metrics:
+                self.root_tracking_batches.append(torch.cat((
+                    self.root_tracking_accumulator,
+                    self.terminate_state[:, None],
+                    env_motion_ids[:, None],
+                ), dim=-1))
             self.sampled_motion_idx.append(env_motion_ids)
             self.env_eval_loop_idx += 1
 

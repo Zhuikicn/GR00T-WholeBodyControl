@@ -108,6 +108,7 @@ Documentation
 
    getting_started/installation_training
    user_guide/training
+   user_guide/root_tracking
    user_guide/training_data
    user_guide/new_embodiments
 
