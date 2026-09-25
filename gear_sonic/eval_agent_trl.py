@@ -462,6 +462,8 @@ def main(override_config: omegaconf.OmegaConf):
         logger.info("Successfully loaded policy state dict")
 
     state.global_step = checkpoint["state"].global_step
+    if env.config.get("root_latent_actions", False):
+        env.root_latent_module = model.policy.actor_module
 
     schedule_wrapper = easydict.EasyDict(env=env, model=model)
     if "schedule_dict" in config.trainer:

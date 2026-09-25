@@ -48,6 +48,8 @@ class RewardsCfg:
     tracking_vr_3point_force = None
     tracking_vr_2wrists_ori_tight = None
     tracking_vr_2wrists_local_ori = None
+    root_meta_action_rate = None
+    root_full_token_rate = None
     tracking_head_local_ori = None
     anti_shake_ang_vel = None
     tracking_vr_5point_local = None
@@ -56,6 +58,16 @@ class RewardsCfg:
     energy_consumption = None
     is_terminated = None
     upright_penalty = None
+
+
+def root_meta_action_rate(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Squared change of the sampled, unscaled 64-dimensional residual."""
+    return (env._root_meta_action - env._root_prev_meta_action).square().sum(-1) * env._root_has_previous
+
+
+def root_full_token_rate(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Squared change of the actual post-FSQ decoder input, excluding resets."""
+    return (env._root_token - env._root_prev_token).square().sum(-1) * env._root_has_previous
 
 
 def tracking_anchor_pos_error(

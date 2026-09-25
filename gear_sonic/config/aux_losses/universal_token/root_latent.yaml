@@ -1,0 +1,4 @@
+# @package algo.config.actor.backbone
+# RootLatentPolicy computes the residual-mean L2 directly.
+aux_loss_func: {}
+aux_loss_coef: {}

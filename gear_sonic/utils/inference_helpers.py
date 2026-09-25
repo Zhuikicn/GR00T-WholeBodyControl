@@ -27,6 +27,13 @@ def _write_input_layout(full_path, features, module):
         offset += size
     layout = {"input_name": "obs_dict", "input_dim": offset, "fields": fields}
     if any(name == "motion_root_trajectory_heading" for name, _ in features):
+        if hasattr(module, "residual_scale"):
+            layout["root_policy"] = {
+                "ppo_action": "unscaled 64-dimensional latent residual",
+                "execution": "deterministic residual mean",
+                "residual_scale": module.residual_scale,
+                "fusion": "FSQ(original_encoder_latent + residual_scale * residual_mean)",
+            }
         layout["root_trajectory"] = {
             "body": "pelvis",
             "time_offsets_s": [

@@ -382,6 +382,11 @@ class ManagerEnvWrapper:
     def reset(self, flatten_dict_obs=True):
         obs, info = self.env.reset()
         new_obs = self.process_raw_obs(obs, flatten_dict_obs)
+        if self.config.get("root_latent_actions", False):
+            self._last_obs_dict = new_obs
+            for name in ("_root_meta_action", "_root_prev_meta_action", "_root_token", "_root_prev_token"):
+                setattr(self.env, name, torch.zeros(self.num_envs, 64, device=self.device))
+            self.env._root_has_previous = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         # Initialize success_lift to False for all envs after reset (used unconditionally in step())
         self.env.success_lift = torch.zeros(
             self.env.num_envs, dtype=torch.bool, device=self.env.device
@@ -631,7 +636,17 @@ class ManagerEnvWrapper:
         return body_actions
 
     def step(self, actions):
-        if self.action_transform_module is not None:
+        if self.config.get("root_latent_actions", False):
+            meta_actions = actions["actions"]
+            obs = {key: value.unsqueeze(1) for key, value in self._last_obs_dict.items()}
+            with torch.no_grad():
+                body_actions, tokens = self.root_latent_module.transform_actions(obs, meta_actions)
+            self.env._root_prev_meta_action.copy_(self.env._root_meta_action)
+            self.env._root_meta_action.copy_(meta_actions)
+            self.env._root_prev_token.copy_(self.env._root_token)
+            self.env._root_token.copy_(tokens[:, -1])
+            env_actions = body_actions[:, -1]
+        elif self.action_transform_module is not None:
             # Use provided obs_dict or fall back to stored obs from last reset/step
             if "obs_dict" in actions:
                 obs_dict = actions["obs_dict"].copy()
@@ -865,6 +880,11 @@ class ManagerEnvWrapper:
         # This prevents a false large rate penalty on the first step of a new episode
         # Only applies when action_transform_module is used (buffers created in reset())
         reset_mask = dones.bool()
+        if self.config.get("root_latent_actions", False):
+            # Reward computation has already used the pre-reset transition.
+            self.env._root_has_previous.copy_(~reset_mask)
+            for name in ("_root_meta_action", "_root_prev_meta_action", "_root_token", "_root_prev_token"):
+                getattr(self.env, name)[reset_mask] = 0
         if reset_mask.any() and hasattr(self.env, "_prev_meta_action"):
             self.env._prev_meta_action[reset_mask] = 0.0  # noqa: SLF001
             self.env._last_meta_action[reset_mask] = 0.0  # noqa: SLF001

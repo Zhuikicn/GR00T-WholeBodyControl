@@ -108,7 +108,7 @@ class Actor(nn.Module):
         ), "running_mean_std and use_batch_norm cannot be both True"
 
         # Action noise
-        self.num_actions = self.env_config.robot.actions_dim
+        self.num_actions = algo_config.get("policy_action_dim", self.env_config.robot.actions_dim)
         init_noise_std = algo_config.init_noise_std
 
         # Support both std and log_std parameterization

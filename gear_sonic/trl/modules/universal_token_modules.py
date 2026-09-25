@@ -787,6 +787,40 @@ class UniversalTokenModule(nn.Module):
 
         return output_dict
 
+    @torch.no_grad()
+    def base_policy_diagnostics(self, input_data, std):
+        """Compare G1 with its frozen base on identical observations, per sample.
+
+        The baseline bypasses additive encoders but shares the frozen original
+        encoder, quantizer and decoder. Requires a frozen action distribution.
+        """
+        obs = self.parse_tokenizer_obs(input_data)
+        mask = self.create_encoder_masks(obs)["g1"]
+        frame_mask, token_mask = self._create_frame_and_token_masks(obs)
+        base_latent = self._encode_single("g1", obs, mask, frame_mask=frame_mask)
+        tokens, latent = self.encode("g1", obs, mask, frame_mask=frame_mask)
+        base_tokens, _ = self.quantizer(base_latent)
+        proprioception = torch.cat(
+            [input_data[key] for key in self.proprioception_features], dim=-1
+        ).flatten(0, 1)[mask]
+        decode_obs = {key: value.flatten(0, 1)[mask] for key, value in obs.items()}
+        decode_obs["proprioception"] = proprioception
+        if token_mask is not None:
+            token_mask = token_mask[mask]
+        actions = []
+        for codes in (tokens, base_tokens):
+            decode_obs["token"] = codes
+            decode_obs["token_flattened"] = codes.flatten(1)
+            actions.append(self.decode("g1_dyn", decode_obs, token_mask=token_mask)["action"])
+        delta = actions[0].float() - actions[1].float()
+        residual = (latent.float() - base_latent.float()).flatten(1)
+        return {
+            "action_delta_rms": delta.square().mean(-1).sqrt(),
+            "base_policy_kl": 0.5 * (delta / std.float()).square().sum(-1),
+            "residual_rms": residual.square().mean(-1).sqrt(),
+            "token_change_fraction": (tokens != base_tokens).flatten(1).float().mean(-1),
+        }
+
     def forward(  # noqa: D417
         self,
         input_data,
@@ -794,6 +828,7 @@ class UniversalTokenModule(nn.Module):
         return_dict=False,
         latent_residual=None,
         latent_residual_mode="post_quantization",
+        base_policy_diagnostics_std=None,
         **kwargs,  # noqa: ARG002
     ):
         """Run the full encode → quantize → decode pipeline.
@@ -826,6 +861,8 @@ class UniversalTokenModule(nn.Module):
                   quantized together with the encoder latent).
                 * ``"pre_quantization_replace"`` - replace the encoder latent
                   entirely with ``latent_residual`` before quantization.
+            base_policy_diagnostics_std: Frozen action standard deviation. When
+                provided, return per-state G1 baseline diagnostics without gradients.
             **kwargs: Passed through; currently unused.
 
         Returns:
@@ -847,6 +884,9 @@ class UniversalTokenModule(nn.Module):
             When ``compute_aux_loss=False`` and ``return_dict=False``:
             ``action_mean`` tensor directly.
         """
+        if base_policy_diagnostics_std is not None:
+            return self.base_policy_diagnostics(input_data, base_policy_diagnostics_std)
+
         # parse tokenizer obs
         batch_size, seq_len = input_data["actor_obs"].shape[:2]
         tokenizer_obs = self.parse_tokenizer_obs(input_data)

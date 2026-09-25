@@ -337,8 +337,9 @@ cursor tracked before environment reset.
 
 For offline trajectory tracking with privileged root pose, use
 `+exp=manager/universal_token/all_modes/sonic_v1_1_root_tracking`.
-The experiment trains a 10-frame root-trajectory residual encoder and critic
-with the original v1.1 actor frozen. See the
+The experiment runs PPO on a 64-dimensional latent residual from a 10-frame
+root-trajectory branch, with the original v1.1 controller frozen. Residual
+amplitude and temporal penalties regularize the correction. See the
 [root tracking guide](docs/source/user_guide/root_tracking.md) for checkpoint
 setup, training, paired evaluation and ONNX input layouts.
 

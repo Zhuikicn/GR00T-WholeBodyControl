@@ -250,6 +250,8 @@ class PrinterHVCallback(TrainerCallback):  # noqa: F405
             )
 
             for k, v in logs.items():
+                if k.startswith("base_policy/"):
+                    log_string += f"{k}: {v:.6g}\n"
                 if k.startswith("objective/"):
                     # Keep the original logic
                     if k.startswith("objective/kin_"):
@@ -419,6 +421,8 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
 
         if checkpoint is not None:
             self.load_checkpoint(checkpoint, resume=resume)
+        if self.env.config.get("root_latent_actions", False):
+            self.env.root_latent_module = self.policy_model.actor_module
 
     def _init_trl(
         self,
@@ -1838,12 +1842,36 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             ######################################################### Sync Running Mean Std #########################################################  # noqa: E501
 
             with torch.no_grad():
-                learn_time = time.time() - end_collection_time
                 eps = int(self.state.episode / (time.time() - start_time))
 
                 metrics = {}
                 train_metrics = self._get_train_metrics()
                 metrics.update(train_metrics)
+                diagnostic_samples = self.config.get("base_policy_diagnostic_samples", 0)
+                if diagnostic_samples:
+                    # Evenly sample the collected states without advancing the training RNG.
+                    all_obs = rollout_data["all_obs_dict"]
+                    num_states = all_obs["actor_obs"].shape[0] * all_obs["actor_obs"].shape[1]
+                    indices = torch.linspace(
+                        0, num_states - 1, min(diagnostic_samples, num_states), device=device
+                    ).long()
+                    diagnostic_obs = {
+                        key: value.flatten(0, 1)[indices].unsqueeze(1)
+                        for key, value in all_obs.items()
+                    }
+                    was_training = self.policy_model.training
+                    self.policy_model.eval()
+                    diagnostics = self.policy_model(
+                        diagnostic_obs,
+                        base_policy_diagnostics_std=self.policy_model.get_std,
+                    )
+                    self.policy_model.train(was_training)
+                    for name, values in diagnostics.items():
+                        values = self.accelerator.gather_for_metrics(values)
+                        metrics[f"base_policy/{name}_mean"] = values.mean().item()
+                        metrics[f"base_policy/{name}_p95"] = torch.quantile(values, 0.95).item()
+                    metrics["base_policy/sample_count"] = values.numel()
+                learn_time = time.time() - end_collection_time
                 metrics["eps"] = eps
                 metrics["objective/rewards"] = (
                     self.accelerator.gather_for_metrics(
@@ -2203,6 +2231,14 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                 else checkpoint["policy_state_dict"]
             )
             if not resume:
+                if (
+                    hasattr(model.policy.actor_module, "base_action_std")
+                    and "actor_module.base_action_std" not in policy_state
+                ):
+                    # Adapt an original v1.1 checkpoint: preserve its physical-action
+                    # std for diagnostics and initialize a fresh latent distribution.
+                    policy_state["actor_module.base_action_std"] = policy_state["std"].clone()
+                    policy_state["std"] = model.policy.state_dict()["std"]
                 for module_name in new_actor_modules:
                     prefix = module_name + "."
                     if not any(key.startswith(prefix) for key in policy_state):
