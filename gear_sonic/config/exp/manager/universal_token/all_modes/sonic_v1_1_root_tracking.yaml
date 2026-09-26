@@ -1,6 +1,7 @@
 # @package _global_
 defaults:
   - /exp/manager/universal_token/all_modes/sonic_v1_1
+  - /root_critic: xy_preview
   - override /aux_losses: universal_token/root_latent
   - _self_
 
@@ -28,11 +29,11 @@ manager_env:
     root_meta_action_rate:
       _target_: isaaclab.managers.RewardTermCfg
       func: gear_sonic.envs.manager_env.mdp:root_meta_action_rate
-      weight: -0.1
+      weight: 0.0
     root_full_token_rate:
       _target_: isaaclab.managers.RewardTermCfg
       func: gear_sonic.envs.manager_env.mdp:root_full_token_rate
-      weight: -0.01
+      weight: 0.0
     tracking_anchor_xy:
       _target_: isaaclab.managers.RewardTermCfg
       func: gear_sonic.envs.manager_env.mdp:tracking_anchor_pos_error
@@ -54,7 +55,7 @@ algo:
       backbone:
         _target_: gear_sonic.trl.modules.root_latent_policy.RootLatentPolicy
         residual_scale: 0.1
-        residual_l2_coef: 0.1
+        residual_l2_coef: 1.0
         dt_future_ref_frames: ${manager_env.commands.motion.dt_future_ref_frames}
         reencode_smpl_g1_recon: false
         freeze_decoders: true

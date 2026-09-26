@@ -16,16 +16,26 @@ from gear_sonic.trl.utils.common import wandb_run_exists
 class ModelSaveCallback(TrainerCallback):
     """Callback to save model state_dict during training."""
 
-    def __init__(self, save_dir, save_frequency=1000, save_last_frequency=50, max_disk_usage=None):
+    def __init__(
+        self,
+        save_dir,
+        save_frequency=1000,
+        save_last_frequency=50,
+        max_saved_checkpoints=None,
+        max_disk_usage=None,
+    ):
         """
         Args:
             save_dir (str): Directory to save model checkpoints
             save_frequency (int): Save model every N steps
+            save_last_frequency (int): Update last.pt every N steps
+            max_saved_checkpoints (int | None): Keep this many newest numbered checkpoints
             max_disk_usage (float): Maximum disk usage in TB
         """
         self.save_dir = Path(save_dir)
         self.save_frequency = save_frequency
         self.save_last_frequency = save_last_frequency
+        self.max_saved_checkpoints = max_saved_checkpoints
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.save_last_only = False
         self.max_disk_usage = max_disk_usage
@@ -64,7 +74,7 @@ class ModelSaveCallback(TrainerCallback):
             # Only save regular checkpoints if save_last_only is False
             if not self.save_last_only and state.global_step % self.save_frequency == 0:
                 env_state_dict = env.get_env_state_dict()
-                ModelSaveCallback.save_checkpoint(
+                saved = ModelSaveCallback.save_checkpoint(
                     model,
                     optimizer,
                     lr_scheduler,
@@ -73,8 +83,16 @@ class ModelSaveCallback(TrainerCallback):
                     args,
                     f"{self.save_dir}/model_step_{state.global_step:06d}.pt",
                 )
+                if saved and self.max_saved_checkpoints is not None:
+                    numbered = sorted(
+                        self.save_dir.glob("model_step_[0-9]*.pt"),
+                        key=lambda path: int(path.stem.rsplit("_", 1)[1]),
+                    )
+                    excess = max(0, len(numbered) - self.max_saved_checkpoints)
+                    for old_checkpoint in numbered[:excess]:
+                        old_checkpoint.unlink()
 
-            # Always save last checkpoint every 50 steps
+            # Update the resumable checkpoint at the configured frequency.
             if state.global_step % self.save_last_frequency == 0:
                 env_state_dict = env.get_env_state_dict()
                 ModelSaveCallback.save_checkpoint(
@@ -159,7 +177,7 @@ class ModelSaveCallback(TrainerCallback):
                     # Atomic rename (os.replace is atomic on POSIX systems)
                     os.replace(tmp_path, save_path)
                     print(f"Saved model checkpoint to {save_path}")
-                    break
+                    return True
                 except Exception as e:
                     # Clean up temp file if it exists
                     if "tmp_path" in locals() and os.path.exists(tmp_path):
@@ -174,3 +192,4 @@ class ModelSaveCallback(TrainerCallback):
                     time.sleep(
                         5
                     )  # Wait a bit before retrying (helps with transient filesystem issues)
+            return False

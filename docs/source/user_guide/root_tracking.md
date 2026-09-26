@@ -51,16 +51,37 @@ correction mean. The trainable latent exploration standard deviation starts at
 Evaluation and ONNX export use the residual mean. PPO stores the sampled raw
 64-dimensional residuals and computes log-probabilities in that space. The
 frozen SONIC executes in the environment wrapper without gradients; the PPO
-update does not differentiate through FSQ or the body decoder. The critic uses
-the original privileged observations and v1.1 initialization.
+update does not differentiate through FSQ or the body decoder.
+
+Root training defaults to `root_critic=base`, using the original 1645 privileged
+observations and critic. Add `root_critic=xy_preview` to the training command
+to enable the 40-dimensional XY preview (1685 total). Use `root_critic=base`
+to explicitly disable it. This selection retains the original hidden layers and scalar
+value output. The ten frames use the actor's reference times and endpoint
+padding. Each frame contains `[dx_ref, dy_ref, ex, ey]`, in meters:
+
+- Reference displacement: future reference root minus the current reference root.
+- Tracking error: future reference root minus the current measured pelvis.
+
+Both vectors are rotated into the current measured heading frame. The first
+frame's reference displacement is zero; its error is the current XY tracking
+error. Frames are flattened in temporal order. The first-layer weights for
+these 40 inputs start at zero, preserving the pretrained value prediction at
+initialization. All critic weights remain trainable under the existing PPO
+value loss. Original observation normalization statistics are preserved; the
+preview has independent running statistics and sample count, synchronized
+across training processes. Actor observations and deployment interfaces are
+unchanged by this critic extension.
 
 The auxiliary loss is `0.1 * mean(mu_residual**2)` on the unscaled residual
-mean, averaged across samples and latent coordinates. Additional reward penalties
-are `-0.1 * sum((u_t - u_previous)**2)` and
-`-0.01 * sum((token_t - token_previous)**2)`. They use the sampled raw residual
-and actual post-FSQ token, respectively. Both penalties exclude the first step
-after an environment reset, and their state is cleared at reset. They use the
-same reward-manager time scaling as other reward terms. No G1 reconstruction
+mean, averaged across samples and latent coordinates. Two reward terms smooth the
+residual stream, `root_meta_action_rate` (`-0.1 * sum((u_t - u_previous)**2)` on
+the sampled raw residual) and `root_full_token_rate`
+(`-0.01 * sum((token_t - token_previous)**2)` on the actual post-FSQ token). Both
+carry `weight: 0.0` in the training config, so the reward manager skips them and
+the `Env/Episode_Reward/root_*_rate` entries stay at zero. Both exclude the first
+step after an environment reset, and their state is cleared at reset. They use
+the same reward-manager time scaling as other reward terms. No G1 reconstruction
 or cross-modal auxiliary loss is used.
 
 Original rewards are retained. The additional horizontal reward is
@@ -137,12 +158,19 @@ python gear_sonic/train_agent_trl.py \
   ++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=16
 ```
 
-Initial adaptation loads the original encoder, FSQ, decoder and critic weights
-strictly, initializes the root branch and a fresh 64-dimensional action
+Initial adaptation loads the original encoder, FSQ and decoder weights
+strictly and, when `root_critic=xy_preview`, expands the pretrained critic's
+first layer with 40 zero columns. It
+initializes the root branch and a fresh 64-dimensional action
 standard deviation, and creates a new optimizer. The original 29-dimensional
 standard deviation is retained only as a diagnostic normalization buffer.
 To resume, set `+resume=true` and `checkpoint=<latent-policy-checkpoint.pt>`;
 the branch, exploration distribution, critic and optimizer are restored.
+Set the same `root_critic` option used to train the checkpoint when resuming;
+resume loads the critic and normalization states strictly, without automatic
+architecture selection. To initialize the preview critic from an older
+1645-input critic checkpoint, use `root_critic=xy_preview`, leave resume disabled,
+and start a new run; the critic is expanded and optimizers are recreated.
 
 The first branch weight has shape `[512,154]`, its output has 64 coordinates,
 and its final layer is Linear. Resume checkpoints must match this architecture

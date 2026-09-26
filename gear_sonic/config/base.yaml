@@ -35,6 +35,7 @@ save_dir: ${experiment_dir}/.hydra
 force_flat_terrain: False
 
 use_wandb: false
+wandb_run_name: null
 log_task_name: TEST
 
 multi_gpu: False

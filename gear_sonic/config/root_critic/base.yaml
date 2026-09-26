@@ -1,0 +1,11 @@
+# @package _global_
+# Original privileged observations and pretrained critic architecture.
+manager_env:
+  observations:
+    critic:
+      root_xy_preview: null
+
+algo:
+  config:
+    critic:
+      _target_: gear_sonic.trl.modules.actor_critic_modules.Critic

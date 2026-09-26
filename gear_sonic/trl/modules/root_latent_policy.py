@@ -7,7 +7,7 @@ from gear_sonic.trl.modules.universal_token_modules import UniversalTokenModule
 
 
 class RootLatentPolicy(UniversalTokenModule):
-    def __init__(self, residual_scale=0.1, residual_l2_coef=0.1, **kwargs):
+    def __init__(self, residual_scale=0.1, residual_l2_coef=1.0, **kwargs):
         super().__init__(**kwargs)
         self.residual_scale = residual_scale
         self.residual_l2_coef = residual_l2_coef

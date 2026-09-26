@@ -1985,6 +1985,8 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
             ):
                 self.accelerator.wait_for_everyone()
                 self.value_model.running_mean_std.sync_across_gpus(self.accelerator)
+                if hasattr(self.value_model, "preview_running_mean_std"):
+                    self.value_model.preview_running_mean_std.sync_across_gpus(self.accelerator)
 
     def sync_adaptive_sampling(self):
         """Synchronize adaptive motion sampling weights across GPU processes."""
@@ -2249,7 +2251,10 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
                         )
             # Original parameters and partially present branches must match exactly.
             model.policy.load_state_dict(policy_state, strict=True)
-            model.value_model.load_state_dict(checkpoint["value_state_dict"], strict=True)
+            if not resume and hasattr(model.value_model, "load_pretrained_state_dict"):
+                model.value_model.load_pretrained_state_dict(checkpoint["value_state_dict"])
+            else:
+                model.value_model.load_state_dict(checkpoint["value_state_dict"], strict=True)
         elif "actor_model_state_dict" in checkpoint:
             model.policy.load_state_dict(checkpoint["actor_model_state_dict"])
         elif "policy_state_dict" in checkpoint:

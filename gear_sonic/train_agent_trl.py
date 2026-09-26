@@ -206,7 +206,9 @@ def main(config: OmegaConf):
     unresolved_conf = OmegaConf.to_container(config, resolve=False)
     if config.use_wandb and accelerator.is_main_process:
         project_name = f"{config.project_name}"
-        run_name = config.experiment_dir.replace(f"{config.base_dir}/{project_name}/", "")
+        run_name = config.wandb_run_name or config.experiment_dir.replace(
+            f"{config.base_dir}/{project_name}/", ""
+        )
         wandb_dir = Path(config.wandb.wandb_dir)
         wandb_dir.mkdir(exist_ok=True, parents=True)
         wandb_group = None if config.wandb.wandb_id is not None else config.wandb.wandb_group

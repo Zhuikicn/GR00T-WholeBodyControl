@@ -1,0 +1,16 @@
+# @package _global_
+# Ten frames of heading-frame reference XY displacement and tracking error.
+manager_env:
+  observations:
+    critic:
+      root_xy_preview:
+        _target_: isaaclab.managers.ObservationTermCfg
+        func: gear_sonic.envs.manager_env.mdp:root_xy_preview
+        params:
+          command_name: motion
+
+algo:
+  config:
+    critic:
+      _target_: gear_sonic.trl.modules.root_preview_critic.RootPreviewCritic
+      preview_dim: 40

@@ -350,6 +350,7 @@ class PrivilegedCfg(ObsGroup):
 
     # Terrain observations
     height_map_flat = None
+    root_xy_preview = None
 
 
 @configclass
@@ -1149,6 +1150,23 @@ def command_multi_future_root_transforms(
         return transforms.reshape(env.num_envs, command.num_future_frames, -1)
     else:
         return transforms.reshape(env.num_envs, -1)
+
+
+def root_xy_preview(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    """Heading-frame [reference displacement XY, tracking error XY] per frame.
+
+    Displacement uses the current reference root as origin. Tracking error uses
+    the measured current root. The shared reference buffer provides endpoint padding.
+    """
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    positions = command.anchor_pos_w_multi_future.reshape(env.num_envs, -1, 3)
+    robot_position = command.robot.data.body_pos_w[:, command.robot_anchor_body_index]
+    robot_orientation = command.robot.data.body_quat_w[:, command.robot_anchor_body_index]
+    heading_inv = quat_inv(torch_transform.get_heading_q(robot_orientation))[:, None, :]
+    heading_inv = heading_inv.expand(-1, positions.shape[1], -1)
+    displacement = quat_apply(heading_inv, positions - positions[:, :1])
+    error = quat_apply(heading_inv, positions - robot_position[:, None, :])
+    return torch.cat((displacement[..., :2], error[..., :2]), dim=-1).flatten(1)
 
 
 def motion_root_trajectory_heading(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
