@@ -1096,6 +1096,7 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         ratio_stats = torch.zeros(stats_shape, device=device)
         advantage_mean_stats = torch.zeros(stats_shape, device=device)
         advantage_std_stats = torch.zeros(stats_shape, device=device)
+        explained_variance_stats = torch.zeros(stats_shape, device=device)
         if self.compute_imgaug_bc_loss:
             imgaug_bc_loss_stats = torch.zeros(stats_shape, device=device)
             weighted_imgaug_bc_loss_stats = torch.zeros(stats_shape, device=device)
@@ -1110,6 +1111,7 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         self.ratio_stats = ratio_stats
         self.advantage_mean_stats = advantage_mean_stats
         self.advantage_std_stats = advantage_std_stats
+        self.explained_variance_stats = explained_variance_stats
         if self.use_symmetry:
             estimation_loss_stats = torch.zeros(stats_shape, device=device)
             swap_loss_stats = torch.zeros(stats_shape, device=device)
@@ -1563,19 +1565,25 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         )
         self.vf_clipfrac_stats[ppo_epoch_idx, minibatch_idx, microbatch_idx] = vf_clipfrac
         self.ratio_stats[ppo_epoch_idx, minibatch_idx, microbatch_idx] = ratio.mean()
-        self.advantage_mean_stats[ppo_epoch_idx, minibatch_idx, microbatch_idx] = mb_rollout_data[
-            "mb_advantage"
-        ].mean()
-        self.advantage_std_stats[ppo_epoch_idx, minibatch_idx, microbatch_idx] = mb_rollout_data[
-            "mb_advantage"
-        ].std()
+        # ``mb_advantage`` is already normalized to zero mean and unit std, so
+        # diagnostics read the raw advantage ``return - value`` instead.
+        mb_return = mb_rollout_data["mb_return"]
+        mb_advantage_raw = mb_return - mb_rollout_data["mb_values"]
+        self.advantage_mean_stats[ppo_epoch_idx, minibatch_idx, microbatch_idx] = (
+            mb_advantage_raw.mean()
+        )
+        self.advantage_std_stats[ppo_epoch_idx, minibatch_idx, microbatch_idx] = mb_advantage_raw.std()
+        self.explained_variance_stats[ppo_epoch_idx, minibatch_idx, microbatch_idx] = (
+            1.0 - mb_advantage_raw.var() / mb_return.var()
+        )
 
     def _get_train_metrics(self):
         """Gather and aggregate training statistics from all processes.
 
         Returns:
             Dict of scalar metrics (approx KL, clip fractions, losses, entropy,
-            ratios, advantage stats) averaged across all GPUs and update steps.
+            ratios, raw advantage stats, value explained variance) averaged
+            across all GPUs and update steps.
         """
         metrics = {}
 
@@ -1631,6 +1639,9 @@ class TRLPPOTrainer(PPOTrainer):  # noqa: F405
         )
         metrics["val/advantage_std"] = (
             self.accelerator.gather_for_metrics(self.advantage_std_stats).mean().item()
+        )
+        metrics["val/explained_variance"] = (
+            self.accelerator.gather_for_metrics(self.explained_variance_stats).mean().item()
         )
         metrics["objective/entropy"] = metrics["loss/entropy_avg"]
 

@@ -29,17 +29,28 @@ MuJoCo `qpos` provides XYZ in columns `0:3` and a `wxyz` quaternion in `3:7`;
 at 50 Hz these references use offsets `[0,5,10,...,45]`.
 
 The original G1 encoder produces a pre-quantization latent of shape `[batch,2,32]`.
-The branch concatenates its flattened 64 values followed by the 90 root values,
-giving 154 input features. This latent comes from the original encoder before
-adding the branch contribution or applying FSQ.
+The branch concatenates its flattened 64 values, the 90 root values, and
+93 current-state values from the original actor observations, giving 247 input
+features. This latent comes from the original encoder before adding the branch
+contribution or applying FSQ.
+
+The current-state order is gravity direction (3), base angular velocity (3),
+joint position (29), joint velocity (29), and previous body action (29). Each
+value is taken from the newest frame of its own actor-observation history,
+preserving the original coordinate conventions, noise and scaling. The 930-value
+actor history is term-major in the environment's order: angular velocity, joint
+position, joint velocity, previous action, gravity direction. Frames within each
+term are oldest-to-newest. The current state is not its final 93 values.
+No privileged linear velocity or
+additional simulator state is used. No input normalization is added.
 
 ```text
-concat(original_latent[64], root_observation[90])
-154 -> Linear(512) -> SiLU -> Linear(256) -> SiLU
+concat(original_latent[64], root_observation[90], actor_current_state[93])
+247 -> Linear(512) -> SiLU -> Linear(256) -> SiLU
    -> Linear(128) -> SiLU -> Linear(64)
 
 z = original_g1_encoder(motion_observations)
-mu_residual = root_branch(concat(flatten(z), flatten(root_observation)))
+mu_residual = root_branch(concat(flatten(z), flatten(root_observation), actor_current_state))
 u ~ Normal(mu_residual, diag(sigma_residual**2))  # PPO action during training
 token = FSQ(z + 0.1 * reshape(u, [2,32]))
 action = original_decoder(token, proprioception)
@@ -53,10 +64,10 @@ Evaluation and ONNX export use the residual mean. PPO stores the sampled raw
 frozen SONIC executes in the environment wrapper without gradients; the PPO
 update does not differentiate through FSQ or the body decoder.
 
-Root training defaults to `root_critic=base`, using the original 1645 privileged
-observations and critic. Add `root_critic=xy_preview` to the training command
-to enable the 40-dimensional XY preview (1685 total). Use `root_critic=base`
-to explicitly disable it. This selection retains the original hidden layers and scalar
+Root training defaults to `root_critic=xy_preview`, adding a 40-dimensional XY
+preview to the original 1645 privileged observations (1685 total). Use
+`root_critic=base` to select the original critic observations. This selection
+retains the original hidden layers and scalar
 value output. The ten frames use the actor's reference times and endpoint
 padding. Each frame contains `[dx_ref, dy_ref, ex, ey]`, in meters:
 
@@ -73,7 +84,7 @@ preview has independent running statistics and sample count, synchronized
 across training processes. Actor observations and deployment interfaces are
 unchanged by this critic extension.
 
-The auxiliary loss is `0.1 * mean(mu_residual**2)` on the unscaled residual
+The auxiliary loss is `1.0 * mean(mu_residual**2)` on the unscaled residual
 mean, averaged across samples and latent coordinates. Two reward terms smooth the
 residual stream, `root_meta_action_rate` (`-0.1 * sum((u_t - u_previous)**2)` on
 the sampled raw residual) and `root_full_token_rate`
@@ -172,7 +183,7 @@ architecture selection. To initialize the preview critic from an older
 1645-input critic checkpoint, use `root_critic=xy_preview`, leave resume disabled,
 and start a new run; the critic is expanded and optimizers are recreated.
 
-The first branch weight has shape `[512,154]`, its output has 64 coordinates,
+The first branch weight has shape `[512,247]`, its output has 64 coordinates,
 and its final layer is Linear. Resume checkpoints must match this architecture
 and PPO action space. Begin a new run directory when starting from v1.1.
 
@@ -252,12 +263,15 @@ python gear_sonic/eval_agent_trl.py \
 Each exported graph has a companion `.input.json` containing ordered input
 fields, shapes and flattened offsets. Root-aware graphs also record the root
 coordinate convention, time offsets and endpoint padding. The all-encoder
-graph has 1,841 inputs and 64 outputs; the G1 encoder/decoder graph has 1,660
+graph has 1,934 inputs and 64 outputs; the G1 encoder/decoder graph has 1,753
 inputs and 29 outputs. The decoder-only graph retains its 994-to-29 interface.
 The exported encoder uses the residual mean and includes the 0.1 scaling and
 FSQ. Companion metadata records that execution convention.
 The 64 latent conditioning values are computed inside the encoder graph; callers
-supply the 90 root observation values together with the original observations.
+supply the 90 root observation values and 93 current actor-state values together
+with the original observations. The current-state values must match the newest
+frames of the proprioception history supplied to the decoder. Each input manifest
+records the exact actor-history indices used to extract them.
 
 Deployment callers must supply the new root observation. Integrating this input
 into humanoid-locomanip's native replay controller is a separate task.

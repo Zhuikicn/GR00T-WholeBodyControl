@@ -26,6 +26,14 @@ def _write_input_layout(full_path, features, module):
         fields.append({"name": name, "shape": list(shape), "start": offset, "end": offset + size})
         offset += size
     layout = {"input_name": "obs_dict", "input_dim": offset, "fields": fields}
+    if any(name == "actor_current_state" for name, _ in features):
+        layout["actor_current_state"] = {
+            "source": "latest frame of each original actor_obs term, including its noise and scaling",
+            "order": ["gravity_dir", "base_ang_vel", "joint_pos", "joint_vel", "actions"],
+            "dimensions": [3, 3, 29, 29, 29],
+            "actor_obs_indices": module.actor_state_indices.tolist(),
+            "actions": "previous executed body-policy action, not the latent PPO action",
+        }
     if any(name == "motion_root_trajectory_heading" for name, _ in features):
         if hasattr(module, "residual_scale"):
             layout["root_policy"] = {
@@ -96,7 +104,8 @@ def export_policy_as_onnx(inference_model, path, exported_policy_name, example_o
 
 
 def export_universal_token_module_as_onnx(
-    universal_token_module, encoder_name, decoder_name, path, exported_model_name, batch_size=1
+    universal_token_module, encoder_name, decoder_name, path, exported_model_name, batch_size=1,
+    device="cpu",
 ):
     """Export UniversalTokenModule with a specific encoder and decoder as ONNX.
 
@@ -114,11 +123,12 @@ def export_universal_token_module_as_onnx(
         path: Directory path to save the ONNX model.
         exported_model_name: Name of the exported ONNX file.
         batch_size: Batch size for example input.
+        device: PyTorch device used to trace the graph (default: CPU).
     """
     os.makedirs(path, exist_ok=True)
     full_path = os.path.join(path, exported_model_name)
 
-    module = copy.deepcopy(universal_token_module).to("cpu")
+    module = copy.deepcopy(universal_token_module).to(device)
     module.eval()
 
     # Determine which tokenizer observations are needed (union of encoder and decoder inputs)
@@ -129,10 +139,13 @@ def export_universal_token_module_as_onnx(
     encoder_tokenizer_obs = [f for f in encoder_input_features if f not in special_keys]
     decoder_tokenizer_obs = [f for f in decoder_input_features if f not in special_keys]
 
-    # required_tokenizer_obs = list(set(encoder_tokenizer_obs + decoder_tokenizer_obs))
     required_set = set(encoder_tokenizer_obs + decoder_tokenizer_obs)
     required_tokenizer_obs = [
-        name for name in module.tokenizer_obs_names if name in required_set
+        name
+        for name in dict.fromkeys(
+            [*module.tokenizer_obs_names, *encoder_tokenizer_obs, *decoder_tokenizer_obs]
+        )
+        if name in required_set
     ]
 
     # Calculate total input dimension
@@ -145,7 +158,7 @@ def export_universal_token_module_as_onnx(
     proprioception_dim = module.obs_dim_dict.get("actor_obs", 0)
     total_feature_dim += proprioception_dim
 
-    example_input = torch.randn(batch_size, total_feature_dim, device="cpu")
+    example_input = torch.randn(batch_size, total_feature_dim, device=device)
 
     class UniversalTokenWrapper(nn.Module):
         def __init__(self, module, encoder_name, decoder_name, required_tokenizer_obs):
@@ -242,7 +255,7 @@ def export_universal_token_module_as_onnx(
 
 
 def export_universal_token_encoders_as_onnx(
-    universal_token_module, path, exported_model_name, batch_size=1
+    universal_token_module, path, exported_model_name, batch_size=1, device="cpu"
 ):
     """Export only the ENCODERS of a UniversalTokenModule as ONNX.
 
@@ -257,11 +270,12 @@ def export_universal_token_encoders_as_onnx(
         path: Directory path to save the ONNX model.
         exported_model_name: Name of the exported ONNX file.
         batch_size: Batch size for example input.
+        device: PyTorch device used to trace the graph (default: CPU).
     """
     os.makedirs(path, exist_ok=True)
     full_path = os.path.join(path, exported_model_name)
 
-    module = copy.deepcopy(universal_token_module).to("cpu")
+    module = copy.deepcopy(universal_token_module).to(device)
     module.eval()
 
     encoder_names = module.encoders_to_iterate
@@ -278,7 +292,13 @@ def export_universal_token_encoders_as_onnx(
         encoder_input_features = module.get_encoder_input_features(enc_name)
         features_needed.update([f for f in encoder_input_features if f not in special_keys])
 
-    for obs_name in module.tokenizer_obs_names:
+    derived_features = [
+        feature
+        for enc_name in encoder_names
+        for feature in module.get_encoder_input_features(enc_name)
+        if feature in features_needed
+    ]
+    for obs_name in dict.fromkeys([*module.tokenizer_obs_names, *derived_features]):
         if obs_name in features_needed:
             all_tokenizer_obs.append(obs_name)
 
@@ -291,8 +311,8 @@ def export_universal_token_encoders_as_onnx(
             feature_dims = module.tokenizer_obs_dims[feature_name]
             tokenizer_feature_dim += torch.prod(torch.tensor(feature_dims)).item()
 
-    example_tokenizer_obs = torch.randn(batch_size, tokenizer_feature_dim, device="cpu")
-    example_encoder_index = torch.zeros((batch_size, 1), device="cpu")
+    example_tokenizer_obs = torch.randn(batch_size, tokenizer_feature_dim, device=device)
+    example_encoder_index = torch.zeros((batch_size, 1), device=device)
 
     class EncodersOnlyWrapper(nn.Module):
         def __init__(self, module, encoder_names, required_tokenizer_obs):
@@ -305,9 +325,11 @@ def export_universal_token_encoders_as_onnx(
             inputs = obs_dict["actor_obs"]
             encoder_index = inputs[..., 0].long()
             encoder_index_onehot = torch.zeros(
-                (encoder_index.shape[0], len(self.encoder_names)), device="cpu"
+                (encoder_index.shape[0], len(self.encoder_names)), device=inputs.device
             )
-            encoder_index_onehot[torch.arange(encoder_index.shape[0]), encoder_index] = 1.0
+            encoder_index_onehot[
+                torch.arange(encoder_index.shape[0], device=inputs.device), encoder_index
+            ] = 1.0
             tokenizer_input = inputs[..., 1:]
 
             tokenizer_input = tokenizer_input.unsqueeze(1)  # add sequence dimension (B, 1, F)
@@ -388,7 +410,8 @@ def export_universal_token_encoders_as_onnx(
 
 
 def export_universal_token_decoder_as_onnx(
-    universal_token_module, decoder_name, path, exported_model_name, batch_size=1
+    universal_token_module, decoder_name, path, exported_model_name, batch_size=1,
+    device="cpu",
 ):
     """Export only the DECODER of a UniversalTokenModule as ONNX.
 
@@ -402,11 +425,12 @@ def export_universal_token_decoder_as_onnx(
         path: Directory path to save the ONNX model.
         exported_model_name: Name of the exported ONNX file.
         batch_size: Batch size for example input.
+        device: PyTorch device used to trace the graph (default: CPU).
     """
     os.makedirs(path, exist_ok=True)
     full_path = os.path.join(path, exported_model_name)
 
-    module = copy.deepcopy(universal_token_module).to("cpu")
+    module = copy.deepcopy(universal_token_module).to(device)
     module.eval()
 
     # Determine which tokenizer observations the decoder needs
@@ -424,9 +448,9 @@ def export_universal_token_decoder_as_onnx(
     proprioception_dim = module.obs_dim_dict.get("actor_obs", 0)
     token_total_dim = module.token_total_dim
 
-    example_encoded_tokens = torch.randn(batch_size, token_total_dim, device="cpu")
-    example_tokenizer = torch.randn(batch_size, tokenizer_feature_dim, device="cpu")
-    example_proprioception = torch.randn(batch_size, proprioception_dim, device="cpu")
+    example_encoded_tokens = torch.randn(batch_size, token_total_dim, device=device)
+    example_tokenizer = torch.randn(batch_size, tokenizer_feature_dim, device=device)
+    example_proprioception = torch.randn(batch_size, proprioception_dim, device=device)
 
     class DecoderOnlyWrapper(nn.Module):
         def __init__(self, module, decoder_name, required_tokenizer_obs):

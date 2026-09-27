@@ -631,6 +631,9 @@ class UniversalTokenModule(nn.Module):
         input_features = self.encoder_input_features[encoder_name]
 
         obs_list = [tokenizer_obs[key] for key in input_features]
+        if self.encoders_cfg[encoder_name].get("condition_on_base_latent", False):
+            # Additive MLP inputs may mix future-frame observations and current state.
+            obs_list = [obs.flatten(start_dim=2) for obs in obs_list]
         # Only handle dimension broadcasting for the "smpl" encoder_name and for obs with last dim 9 or 12
         if "smpl" in encoder_name:
             max_ndim = max(obs.ndim for obs in obs_list)

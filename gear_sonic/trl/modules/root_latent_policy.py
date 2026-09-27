@@ -1,5 +1,7 @@
 """PPO in root-correction latent space with a frozen SONIC action transform."""
 
+import copy
+
 import torch
 from torch import nn
 
@@ -7,14 +9,47 @@ from gear_sonic.trl.modules.universal_token_modules import UniversalTokenModule
 
 
 class RootLatentPolicy(UniversalTokenModule):
-    def __init__(self, residual_scale=0.1, residual_l2_coef=1.0, **kwargs):
+    def __init__(
+        self, residual_scale=0.1, residual_l2_coef=1.0,
+        actor_state_history_lengths=None, **kwargs
+    ):
+        if actor_state_history_lengths is not None:
+            # Derived from actor_obs; it is not an additional environment sensor.
+            kwargs["env_config"] = copy.deepcopy(kwargs["env_config"])
+            kwargs["env_config"].obs.group_obs_dims.tokenizer["actor_current_state"] = [93]
         super().__init__(**kwargs)
+        self.actor_state_history_lengths = actor_state_history_lengths
+        if actor_state_history_lengths is not None:
+            term_indices = {}
+            offset = 0
+            # PolicyCfg declaration order determines the flattened actor history.
+            for name, dim in (
+                ("base_ang_vel", 3), ("joint_pos", 29), ("joint_vel", 29),
+                ("actions", 29), ("gravity_dir", 3),
+            ):
+                offset += dim * actor_state_history_lengths[name]
+                term_indices[name] = list(range(offset - dim, offset))
+            indices = [
+                index
+                for name in ("gravity_dir", "base_ang_vel", "joint_pos", "joint_vel", "actions")
+                for index in term_indices[name]
+            ]
+            self.register_buffer("actor_state_indices", torch.tensor(indices), persistent=False)
         self.residual_scale = residual_scale
         self.residual_l2_coef = residual_l2_coef
         self.register_buffer("base_action_std", torch.ones(29))
         # Zero correction mean at initialization; latent exploration is separate.
         nn.init.zeros_(self.encoders["root"].module[-1].weight)
         nn.init.zeros_(self.encoders["root"].module[-1].bias)
+
+    def parse_tokenizer_obs(self, input_data):
+        obs = super().parse_tokenizer_obs(input_data)
+        if self.actor_state_history_lengths is not None:
+            # Each term's history is oldest-to-newest; reuse the exact noisy actor values.
+            obs["actor_current_state"] = input_data["actor_obs"].index_select(
+                -1, self.actor_state_indices
+            )
+        return obs
 
     def residual_mean(self, obs):
         with torch.no_grad():

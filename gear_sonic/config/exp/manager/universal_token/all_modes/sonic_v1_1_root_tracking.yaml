@@ -55,7 +55,13 @@ algo:
       backbone:
         _target_: gear_sonic.trl.modules.root_latent_policy.RootLatentPolicy
         residual_scale: 0.1
-        residual_l2_coef: 1.0
+        residual_l2_coef: 0.1
+        actor_state_history_lengths:
+          base_ang_vel: ${actor_prop_history_length}
+          joint_pos: ${actor_prop_history_length}
+          joint_vel: ${actor_prop_history_length}
+          actions: ${actor_actions_history_length}
+          gravity_dir: ${actor_prop_history_length}
         dt_future_ref_frames: ${manager_env.commands.motion.dt_future_ref_frames}
         reencode_smpl_g1_recon: false
         freeze_decoders: true
@@ -70,7 +76,7 @@ algo:
           root:
             additive_to: g1
             condition_on_base_latent: true
-            inputs: [motion_root_trajectory_heading]
+            inputs: [motion_root_trajectory_heading, actor_current_state]
             params:
               _target_: gear_sonic.trl.modules.base_module.BaseModule
               input_dim:
