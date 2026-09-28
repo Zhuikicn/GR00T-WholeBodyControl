@@ -6,6 +6,8 @@ robot root pose and the reference trajectory share a world coordinate system.
 PPO acts in the 64-dimensional latent-residual space. The root branch, its
 exploration standard deviation and the critic are trainable; the original
 SONIC encoder, FSQ and decoders remain frozen.
+`sonic_v1_1_3pt` uses the same residual design and adds the two wrist-link origins
+to the root trajectory input and a fine wrist-position reward.
 
 ## Observation and model
 
@@ -99,6 +101,33 @@ Original rewards are retained. The additional horizontal reward is
 `0.5 * exp(-squared_xy_error / 0.1**2)`, comparing current measured and current
 reference pelvis positions. Future poses provide preview information.
 
+## v1_1_3pt wrist input and reward
+
+The 3-point policy follows the pelvis and the origins of
+`left_wrist_yaw_link` and `right_wrist_yaw_link`. For each of the same ten
+reference times (0 through 0.9 seconds in 0.1-second increments), the wrist
+observation contains 12 values in this order:
+
+```text
+[left_reference_xyz, right_reference_xyz, left_error_xyz, right_error_xyz]
+```
+
+Each reference wrist position is relative to that frame's reference pelvis,
+rotated by the inverse of that pelvis's full orientation. The measured current
+wrist positions are relative to the measured current pelvis, rotated by the
+inverse of its full orientation. Each error is future reference local position
+minus current measured local position. Positions are in metres. The ten frames
+form a `[10,12]` observation (120 values); references beyond the end of a clip
+repeat its last frame. The root branch therefore receives 64 original latent
+values, 90 root values, 120 wrist values and 93 current-state values: 367 total.
+The original G1 encoder and action decoder remain frozen.
+
+The additional reward is the mean of the two per-wrist terms
+`exp(-squared_local_position_error / 0.01**2)`, with weight 1.0. It evaluates
+the current frame and uses wrist-link origins without offsets. The existing
+5-point reward continues to use its configured offset points and 0.1-metre
+scale. The optional XY-preview critic remains selected by default.
+
 ## Training
 
 Use the [SONIC training environment](../getting_started/installation_training.md).
@@ -119,6 +148,27 @@ encoder; SMPL clips are not sampled or trained. The only auxiliary loss is the r
 
 ```bash
 ./run_sonic_root_tracking.sh
+```
+
+For the 3-point configuration, use `./run_sonic_v1_1_3pt.sh` or launch
+`gear_sonic/train_agent_trl.py` after sourcing the same Isaac Sim setup used
+above, with `+exp=manager/universal_token/all_modes/sonic_v1_1_3pt`. It
+initializes from `sonic_v1_1/last.pt` and defaults to
+`outputs/sonic_v1_1_3pt`. Start new runs in a separate output directory.
+Resume requires a 367-input 3-point checkpoint; root-only checkpoints have a
+different first-layer input size.
+
+For a 16-environment, 20-iteration validation run:
+
+```bash
+python gear_sonic/train_agent_trl.py \
+  +exp=manager/universal_token/all_modes/sonic_v1_1_3pt \
+  num_envs=16 headless=true use_wandb=false \
+  experiment_dir=outputs/sonic_v1_1_3pt_smoke \
+  ++algo.config.num_learning_iterations=20 \
+  ++callbacks.model_save.save_frequency=10 \
+  ++callbacks.model_save.save_last_frequency=10 \
+  ++manager_env.commands.motion.motion_lib_cfg.max_unique_motions=16
 ```
 
 The local launcher uses the project's Isaac Sim 5.1 setup, SONIC Conda Python,
@@ -241,6 +291,10 @@ first frame with the same evaluation reset procedure.
 
 `comparison.json` summarizes frame-weighted XY, yaw and joint RMSE, completed
 motion endpoint XY error, observed fall rate, and early termination rate.
+It also reports left and right pelvis-local wrist-position RMSE, the fraction
+of active frames within 1 cm for each wrist, and the fraction where both wrists
+are within 1 cm. These wrist metrics use the link origins and full pelvis
+orientation used by the 3-point reward.
 Per-motion values and logs live in each scenario/controller directory. Failed
 motions have a last-valid XY error and a null completed endpoint. Metrics sample
 the measured state before each control advance, excluding states after reset.
@@ -272,6 +326,10 @@ supply the 90 root observation values and 93 current actor-state values together
 with the original observations. The current-state values must match the newest
 frames of the proprioception history supplied to the decoder. Each input manifest
 records the exact actor-history indices used to extract them.
+For `sonic_v1_1_3pt`, callers also supply the 120 wrist values in the order and
+coordinate convention above; its `.input.json` records the full contract. Its
+all-encoder input is 2,054 values, and its G1 encoder/decoder input is 1,873
+values.
 
 Deployment callers must supply the new root observation. Integrating this input
 into humanoid-locomanip's native replay controller is a separate task.

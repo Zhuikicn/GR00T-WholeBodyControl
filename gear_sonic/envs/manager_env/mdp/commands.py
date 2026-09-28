@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 # Objects spread vertically (Z) since envs only vary in X,Y - much simpler!
 INACTIVE_OBJECT_BASE_OFFSET = torch.tensor([1000.0, 0.0, -50.0])  # 1km away in X, 50m underground
 INACTIVE_OBJECT_Z_SPACING = 10.0  # 10m vertical spacing between objects (must be > chair height)
+G1_WRIST_EE_BODY_NAMES = ("left_wrist_yaw_link", "right_wrist_yaw_link")
 
 
 def _init_variable_frames(
@@ -1796,6 +1797,39 @@ class TrackingCommand(CommandTerm):
         ).view(self.num_envs, self.num_future_frames, -1, 3)
         body_pos_w_env = body_pos_w + self._env.scene.env_origins[:, None, None, :]
         return body_pos_w_env.reshape(self.num_envs, -1)
+
+    @property
+    def wrist_ee_reference_pos_b_multi_future(self) -> torch.Tensor:
+        """Left/right wrist-link origins in each future reference pelvis frame [N,F,2,3]."""
+        wrist_indices = [self.cfg.body_names.index(name) for name in G1_WRIST_EE_BODY_NAMES]
+        body_pos = self.motion_lib.get_body_pos_w(
+            self.future_motion_ids, self.future_time_steps
+        ).view(self.num_envs, self.num_future_frames, self.num_bodies, 3)
+        reference = body_pos[:, :, wrist_indices]
+        anchor_pos = body_pos[:, :, self.motion_anchor_body_index, None, :]
+        anchor_quat = self.anchor_quat_w_multi_future.view(self.num_envs, self.num_future_frames, 1, 4)
+        return quat_apply(quat_inv(anchor_quat).expand(-1, -1, 2, -1), reference - anchor_pos)
+
+    @property
+    def wrist_ee_reference_pos_b(self) -> torch.Tensor:
+        """Current reference wrist-link origins in the current reference pelvis frame [N,2,3]."""
+        wrist_indices = [self.cfg.body_names.index(name) for name in G1_WRIST_EE_BODY_NAMES]
+        body_pos = self.motion_lib.get_body_pos_w(
+            self.motion_ids, self.motion_start_time_steps + self.time_steps
+        )
+        reference = body_pos[:, wrist_indices]
+        anchor_pos = body_pos[:, self.motion_anchor_body_index, None, :]
+        anchor_quat = self.anchor_quat_w[:, None, :]
+        return quat_apply(quat_inv(anchor_quat).expand(-1, 2, -1), reference - anchor_pos)
+
+    @property
+    def robot_wrist_ee_pos_b(self) -> torch.Tensor:
+        """Measured wrist-link origins in the measured pelvis frame [N,2,3]."""
+        wrist_indices = [self.robot.body_names.index(name) for name in G1_WRIST_EE_BODY_NAMES]
+        anchor_pos = self.robot.data.body_pos_w[:, self.robot_anchor_body_index, None, :]
+        anchor_quat = self.robot.data.body_quat_w[:, self.robot_anchor_body_index, None, :]
+        wrists = self.robot.data.body_pos_w[:, wrist_indices]
+        return quat_apply(quat_inv(anchor_quat).expand(-1, 2, -1), wrists - anchor_pos)
 
     @property
     def body_pos_dif_w(self) -> torch.Tensor:

@@ -53,6 +53,7 @@ class RewardsCfg:
     tracking_head_local_ori = None
     anti_shake_ang_vel = None
     tracking_vr_5point_local = None
+    tracking_wrist_ee_local_fine = None
     motion_5point_local_pos = None
     feet_acc = None
     energy_consumption = None
@@ -470,6 +471,15 @@ def tracking_relative_body_pos_error(
     pos_diff = command.body_pos_relative_w[:, tracked] - command.robot_body_pos_w[:, tracked]
     per_body_err = (pos_diff * pos_diff).sum(dim=-1)
     return torch.exp(-per_body_err.mean(dim=-1) / (std * std))
+
+
+def tracking_wrist_ee_local_fine_error(
+    env: ManagerBasedRLEnv, command_name: str, std: float
+) -> torch.Tensor:
+    """Mean per-wrist Gaussian reward for pelvis-local wrist-link origin tracking."""
+    command: TrackingCommand = env.command_manager.get_term(command_name)
+    error = command.wrist_ee_reference_pos_b - command.robot_wrist_ee_pos_b
+    return torch.exp(-error.square().sum(dim=-1) / (std * std)).mean(dim=-1)
 
 
 def tracking_relative_body_ori_error(

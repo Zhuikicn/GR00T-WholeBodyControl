@@ -53,6 +53,21 @@ def _write_input_layout(full_path, features, module):
             "flatten_order": "time-major: [dx,dy,dz,R00,R01,R10,R11,R20,R21] per frame",
             "endpoint_padding": "repeat last reference frame",
         }
+    if any(name == "motion_wrist_ee_local_preview" for name, _ in features):
+        layout["wrist_ee_local_preview"] = {
+            "bodies": ["left_wrist_yaw_link", "right_wrist_yaw_link"],
+            "point": "wrist link origin without offset",
+            "base_body": "pelvis",
+            "time_offsets_s": [
+                i * module.dt_future_ref_frames for i in range(module.num_future_frames)
+            ],
+            "reference": "R_reference_pelvis(t)^T * (p_reference_wrist(t) - p_reference_pelvis(t))",
+            "current": "R_measured_pelvis(now)^T * (p_measured_wrist(now) - p_measured_pelvis(now))",
+            "error": "reference(t) - current(now)",
+            "flatten_order": "time-major: [left_ref_xyz,right_ref_xyz,left_error_xyz,right_error_xyz] per frame",
+            "units": "metres",
+            "endpoint_padding": "repeat last reference frame",
+        }
     Path(full_path).with_suffix(".input.json").write_text(json.dumps(layout, indent=2) + "\n")
 
 

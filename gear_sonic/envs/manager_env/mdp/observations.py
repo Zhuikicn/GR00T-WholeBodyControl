@@ -385,6 +385,7 @@ class TokenizerCfg(ObsGroup):
     command_multi_future_root_transforms_nonflat = None
     motion_anchor_ori_heading_mf_nonflat = None
     motion_root_trajectory_heading = None
+    motion_wrist_ee_local_preview = None
     motion_anchor_ori_refheading_mf_nonflat = None
     heading_diff_robot_ref = None
     motion_anchor_ori_refheading = None
@@ -1188,6 +1189,20 @@ def motion_root_trajectory_heading(env: ManagerBasedEnv, command_name: str) -> t
     return torch.cat(
         (relative_position, relative_rotation[..., :2].reshape(env.num_envs, -1, 6)), dim=-1
     )
+
+
+def motion_wrist_ee_local_preview(env: ManagerBasedEnv, command_name: str) -> torch.Tensor:
+    """Future wrist-link origins and errors in their respective pelvis frames.
+
+    Each of the shared ten reference frames contains left/right reference XYZ,
+    followed by left/right (reference - current robot) XYZ. The current robot
+    wrist positions stay fixed across the preview and use the measured pelvis.
+    """
+    command: commands.TrackingCommand = env.command_manager.get_term(command_name)
+    reference = command.wrist_ee_reference_pos_b_multi_future
+    current = command.robot_wrist_ee_pos_b[:, None, :, :]
+    error = reference - current
+    return torch.cat((reference.flatten(-2), error.flatten(-2)), dim=-1)
 
 
 def motion_anchor_ori_heading_mf(

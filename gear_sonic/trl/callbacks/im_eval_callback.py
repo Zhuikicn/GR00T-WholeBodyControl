@@ -248,7 +248,28 @@ class ImEvalCallback(TrainerCallback):
                 metrics_eval["eval/all_metrics_dict"][name] = (
                     rows[:, index] / counts
                 ).sqrt().cpu().numpy()
-            completed = ~rows[:, 6].bool()
+            for index, side in enumerate(("left", "right")):
+                squared = rows[:, 6 + index]
+                hits = rows[:, 8 + index]
+                metrics_eval[f"eval/root_tracking/{side}_wrist_local_rmse_m"] = (
+                    squared.sum() / counts.sum()
+                ).sqrt().item()
+                metrics_eval[f"eval/root_tracking/{side}_wrist_within_1cm_rate"] = (
+                    hits.sum() / counts.sum()
+                ).item()
+                metrics_eval["eval/all_metrics_dict"][f"{side}_wrist_local_rmse_m"] = (
+                    squared / counts
+                ).sqrt().cpu().numpy()
+                metrics_eval["eval/all_metrics_dict"][f"{side}_wrist_within_1cm_rate"] = (
+                    hits / counts
+                ).cpu().numpy()
+            metrics_eval["eval/root_tracking/both_wrists_within_1cm_rate"] = (
+                rows[:, 10].sum() / counts.sum()
+            ).item()
+            metrics_eval["eval/all_metrics_dict"]["both_wrists_within_1cm_rate"] = (
+                rows[:, 10] / counts
+            ).cpu().numpy()
+            completed = ~rows[:, 11].bool()
             endpoints = rows[:, 4].cpu().tolist()
             metrics_eval["eval/root_tracking/endpoint_xy_m_completed"] = (
                 rows[completed, 4].mean().item() if completed.any() else None
@@ -259,7 +280,7 @@ class ImEvalCallback(TrainerCallback):
             ]
             metrics_eval["eval/all_metrics_dict"]["last_valid_xy_m"] = endpoints
             metrics_eval["eval/root_tracking/observed_fall_rate"] = rows[:, 5].mean().item()
-            metrics_eval["eval/root_tracking/early_termination_rate"] = rows[:, 6].mean().item()
+            metrics_eval["eval/root_tracking/early_termination_rate"] = rows[:, 11].mean().item()
             metrics_eval["eval/root_tracking/push_step"] = self.root_tracking_push_step
             metrics_eval["eval/root_tracking/push_velocity_mps"] = list(self.root_tracking_push_velocity)
 
@@ -363,9 +384,9 @@ class ImEvalCallback(TrainerCallback):
 
             command = self.env.motion_command
             if self.curr_steps == 0:
-                # XY/yaw/joint squared-error sums, count, last XY error, observed fall.
+                # Root errors and wrist-local squared errors / 1 cm hit counts.
                 self.root_tracking_accumulator = torch.zeros(
-                    (self.env.num_envs, 6), device=self.env.device
+                    (self.env.num_envs, 11), device=self.env.device
                 )
             active = ~self.terminate_state.bool() & (
                 self.curr_steps < self.env._motion_lib.get_motion_num_steps(self.env.motion_ids)
@@ -395,6 +416,12 @@ class ImEvalCallback(TrainerCallback):
             height = position[:, 2] - self.env.env.scene.env_origins[:, 2]
             fallen = (height < 0.25) | (actual_rotation[:, 2, 2] < 0.5)
             acc[active, 5] = torch.maximum(acc[active, 5], fallen[active].float())
+            wrist_error = command.wrist_ee_reference_pos_b - command.robot_wrist_ee_pos_b
+            wrist_squared = wrist_error.square().sum(dim=-1)
+            wrist_within_1cm = wrist_squared < 0.01**2
+            acc[active, 6:8] += wrist_squared[active]
+            acc[active, 8:10] += wrist_within_1cm[active].float()
+            acc[active, 10] += wrist_within_1cm[active].all(dim=-1).float()
         obs_dict, rewards, dones, extras = self.env.step(actor_state)
         actor_state.update({"obs": obs_dict, "rewards": rewards, "dones": dones, "extras": extras})
         return actor_state

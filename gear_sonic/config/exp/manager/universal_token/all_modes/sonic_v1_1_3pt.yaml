@@ -1,0 +1,36 @@
+# @package _global_
+# Pelvis trajectory and two wrist-link origins: 3-point latent correction.
+defaults:
+  - /exp/manager/universal_token/all_modes/sonic_v1_1_root_tracking
+  - _self_
+
+experiment_name: sonic_v1_1_3pt
+checkpoint: sonic_v1_1/last.pt
+
+manager_env:
+  observations:
+    tokenizer:
+      motion_wrist_ee_local_preview:
+        _target_: isaaclab.managers.ObservationTermCfg
+        func: gear_sonic.envs.manager_env.mdp:motion_wrist_ee_local_preview
+        params:
+          command_name: motion
+  rewards:
+    tracking_wrist_ee_local_fine:
+      _target_: isaaclab.managers.RewardTermCfg
+      func: gear_sonic.envs.manager_env.mdp:tracking_wrist_ee_local_fine_error
+      weight: 1.0
+      params:
+        command_name: motion
+        std: 0.01
+
+algo:
+  config:
+    actor:
+      backbone:
+        encoders:
+          root:
+            inputs:
+              - motion_root_trajectory_heading
+              - motion_wrist_ee_local_preview
+              - actor_current_state
