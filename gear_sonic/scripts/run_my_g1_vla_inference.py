@@ -2,8 +2,8 @@
 
 The policy server supplies the checkpoint's modality configuration and action
 horizon. Controls and action playback follow run_vla_inference; hand observations
-use the independent measured Dex3 joints. Initial-pose dependencies are shared
-with the original client.
+use the independent measured Dex3 joints. The initial motion token comes from
+the SONIC v1.1 initial-pose configuration.
 """
 
 import queue
@@ -18,7 +18,6 @@ from gear_sonic.camera.composed_camera import ComposedCameraClientSensor
 from gear_sonic.data.robot_model.instantiation.g1 import instantiate_g1_robot_model
 from gear_sonic.scripts.run_vla_inference import (
     InferenceConfig,
-    LATENT_INITIAL_MOTION_TOKEN,
     _compute_closed_hand_joints,
     _inference_worker_loop,
     _sleep_remaining,
@@ -31,6 +30,7 @@ from gear_sonic.utils.data_collection.keyboard_subscriber import ZMQKeyboardSubs
 from gear_sonic.utils.data_collection.telemetry import Telemetry
 from gear_sonic.utils.data_collection.transforms import compute_projected_gravity
 from gear_sonic.utils.data_collection.zmq_state_subscriber import ZMQStateSubscriber
+from gear_sonic.utils.inference.initial_poses_v1_1 import LATENT_INITIAL_MOTION_TOKEN
 from gear_sonic.utils.inference.vla_utils import (
     calculate_latency_compensated_index,
     prepare_observation_for_eval,

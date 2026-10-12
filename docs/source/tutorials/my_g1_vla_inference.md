@@ -6,6 +6,59 @@
 
 客户端 Python 环境需要 Isaac-GR00T、gear_sonic 的推理依赖以及 Pinocchio。服务器环境需要与 checkpoint 对应的 Isaac-GR00T processor 和模型实现。
 
+### 一键启动本机推理
+
+在 WBC 仓库根目录运行小型启动器，启动本机模型服务器、C++、MY_G1 客户端和键盘发布器：
+
+```bash
+python3 gear_sonic/scripts/my_launch.py \
+    --model-path /path/to/checkpoint \
+    --camera-host 192.168.123.164 \
+    --prompt "pour water into the cup"
+```
+
+相机服务仍需在机器人上运行并提供 `ego_view`，设置见 [Data collection](data_collection.md)。启动器不启动相机或仿真。`--model-path` 必须指向可由当前 Isaac-GR00T 环境加载的本地 checkpoint 目录；启动器不修改 checkpoint 配置。
+
+启动器本身只使用 Python 标准库和 tmux。服务器、客户端和键盘默认使用相邻 `Isaac-GR00T/.venv/bin/python`，无需 `.venv_inference` 或手动激活环境。可用 `--gr00t-root /path/to/Isaac-GR00T` 指定其他位置，该环境需同时具备客户端和服务器依赖。
+
+默认 tmux 会话名为 `my_g1_inference`，`inference` 窗口布局如下：
+
+| 位置 | 进程 |
+| --- | --- |
+| 左上 | PolicyServer，默认 `cuda:0`、本机端口 `5550` |
+| 右上 | SONIC C++，默认 v1.1 模型，先加载 `scripts/setup_env.sh` |
+| 左下 | MY_G1 客户端，等待服务器协议 ping 成功后启动 |
+| 右下 | 键盘发布器，在这里输入键名后回车 |
+
+启动后先在右上 C++ 窗格按回车确认 `deploy.sh`，等待 C++ 初始化和客户端就绪。随后在右下键盘窗格输入 `k` 回车、`i` 回车，确认初始姿态稳定，再输入 `p` 回车。启动器不自动发送这些控制键。输入 `t 新指令` 更新后续推理的 prompt。
+
+客户端最多等待服务器 300 秒，每次 ping 超时 1 秒；超时或进程退出时保留窗格和输出，便于查看错误。客户端动作 horizon 自动从服务器读取。用 `Ctrl+b` 后按方向键切换窗格；`Ctrl+b` 后按 `d` 脱离会话并保持进程运行。
+
+录制默认关闭。需要录制时增加 `--data-exporter`，可选 `--dataset-name my_session`，启动器会用 `.venv_data_collection` 在独立 `recording` 窗口启动 exporter，录制任务描述使用启动时的 prompt。用 `Ctrl+b` 后按 `n` 切换窗口；在键盘窗格输入 `c` 开始/停止录制，`x` 丢弃当前 episode。现有 exporter 不处理 `s`/`f` 或运行时 prompt 更新。
+
+需要显示实时 RGB 时增加 `--camera-viewer`：
+
+```bash
+python3 gear_sonic/scripts/my_launch.py \
+    --model-path /path/to/checkpoint \
+    --camera-host 192.168.123.164 \
+    --prompt "pour water into the cup" \
+    --camera-viewer
+```
+
+查看器连接与推理客户端相同的相机地址，在桌面弹出 `SONIC Camera Viewer`，日志放在 tmux 的 `camera` 窗口。它使用 `.venv_data_collection` 的 GUI 版 OpenCV；Isaac 环境中的 headless OpenCV 无法显示窗口。需从有桌面显示的终端运行。在 RGB 窗口内按 `q` 关闭查看器；操作机器人仍在键盘发布器窗格内进行。
+
+其他参数包括 `--device`、`--camera-port`、`--policy-port`、`--interface` 和 `--session`。`--deploy-checkpoint` 指定 SONIC 模型前缀，`--deploy-obs-config` 指定 observation 配置，两者的相对路径以 `gear_sonic_deploy/` 为基准。动作、状态、键盘通路固定使用本机 `5556/5557/5580`。`--dry-run` 只打印启动命令，不检查依赖或创建会话；`--help` 列出全部参数。
+
+已有同名会话时，启动器直接附加，不重启推理或控制进程；增加 `--camera-viewer` 可以补开查看器，已关闭的查看器也会重新启动，正在运行的查看器不重复创建。其余启动参数不应用到已有进程。重连和关闭：
+
+```bash
+tmux attach -t '=my_g1_inference'
+tmux kill-session -t '=my_g1_inference'
+```
+
+### 手动分终端启动
+
 在 GPU 主机的 Isaac-GR00T 环境启动模型服务器：
 
 ```bash
