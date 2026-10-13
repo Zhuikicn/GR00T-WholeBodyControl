@@ -1,4 +1,4 @@
-"""MY_G1 ego-view VLA client for SONIC DDS deployment.
+"""MY_G1 VLA client with ego and optional second view for SONIC DDS deployment.
 
 The policy server supplies the checkpoint's modality configuration and action
 horizon. Controls and action playback follow run_vla_inference; hand observations
@@ -6,6 +6,7 @@ use the independent measured Dex3 joints. The initial motion token comes from
 the SONIC v1.1 initial-pose configuration.
 """
 
+from dataclasses import dataclass
 import queue
 import threading
 import time
@@ -39,6 +40,21 @@ from gear_sonic.utils.inference.vla_utils import (
 from gear_sonic.utils.teleop.zmq.zmq_planner_sender import build_command_message
 
 
+@dataclass
+class MyG1InferenceConfig(InferenceConfig):
+    """MY_G1 policy and independent second-view camera endpoints."""
+
+    embodiment_tag: str = "my_g1"
+    action_horizon: int = 0
+    """Read the server horizon with 0; an explicit horizon must match the server."""
+
+    second_view_host: str = "localhost"
+    """Second-view camera server host."""
+
+    second_view_port: int = 5560
+    """Second-view camera server port, used when the policy requires second_view."""
+
+
 def prepare_observation_from_sensors(
     camera_subscriber,
     state_subscriber,
@@ -46,21 +62,31 @@ def prepare_observation_from_sensors(
     language_prompt: str,
     modality_configs,
     log_errors: bool = False,
+    second_view_subscriber=None,
 ):
     """Assemble the server's MY_G1 state and language fields at the current frame.
 
     RobotModel maps the measured body and Dex3 motor arrays to joint-group order.
     Hand state follows index, middle, thumb, matching Locomanip's MY_G1 exporter.
     Video has shape ``[1, 1, H, W, 3]`` and each state has shape ``[1, 1, D]``.
-    Returns None while camera or robot-state data is being acquired.
+    Each stream keeps its latest sample independently. Returns None while a
+    required image or robot-state stream is being acquired.
     """
     camera_msg = camera_subscriber.read()
+    state_msg = state_subscriber.get_msg(clear=False)
+    second_view_msg = (
+        second_view_subscriber.read() if second_view_subscriber is not None else None
+    )
     if camera_msg is None:
         if log_errors:
             print("[DEBUG] prepare_observation: waiting for camera msg..", flush=True)
         return None
 
-    state_msg = state_subscriber.get_msg()
+    if second_view_subscriber is not None and second_view_msg is None:
+        if log_errors:
+            print("[DEBUG] prepare_observation: waiting for second_view msg..", flush=True)
+        return None
+
     if state_msg is None:
         if log_errors:
             print("[DEBUG] prepare_observation: waiting for state msg..", flush=True)
@@ -80,6 +106,10 @@ def prepare_observation_from_sensors(
         "q": np.asarray(qpos, dtype=np.float32)[np.newaxis, np.newaxis],
         "timestamps": camera_msg["timestamps"]["ego_view"],
     }
+    if second_view_subscriber is not None:
+        observation["video"]["second_view"] = second_view_msg["images"]["second_view"][
+            np.newaxis, np.newaxis
+        ]
     observation = prepare_observation_for_eval(robot_model, observation)
     observation["state"]["projected_gravity"] = compute_projected_gravity(
         state_msg["base_quat"]
@@ -90,7 +120,7 @@ def prepare_observation_from_sensors(
     return observation
 
 
-def main(config: InferenceConfig):
+def main(config: MyG1InferenceConfig):
     pause_loop = True
 
     robot_model = instantiate_g1_robot_model(waist_location="lower_and_upper_body")
@@ -124,6 +154,11 @@ def main(config: InferenceConfig):
     camera_subscriber = ComposedCameraClientSensor(
         server_ip=config.camera_host, port=config.camera_port
     )
+    second_view_subscriber = None
+    if "second_view" in modality_configs["video"].modality_keys:
+        second_view_subscriber = ComposedCameraClientSensor(
+            server_ip=config.second_view_host, port=config.second_view_port
+        )
 
     zmq_context = zmq.Context()
     zmq_socket = zmq_context.socket(zmq.PUB)
@@ -364,6 +399,7 @@ def main(config: InferenceConfig):
                 language_prompt=language_prompt_ref[0],
                 modality_configs=modality_configs,
                 log_errors=True,
+                second_view_subscriber=second_view_subscriber,
             ),
             lambda obs: run_policy_inference_and_process(
                 policy=n1_policy,
@@ -499,15 +535,17 @@ def main(config: InferenceConfig):
         zmq_socket.close()
         zmq_context.term()
         state_subscriber.close()
+        camera_subscriber.close()
+        if second_view_subscriber is not None:
+            second_view_subscriber.close()
         keyboard_listener.close()
         print("Shutdown complete.")
 
 
 if __name__ == "__main__":
     config = tyro.cli(
-        InferenceConfig,
-        default=InferenceConfig(embodiment_tag="my_g1", action_horizon=0),
-        description="MY_G1 ego-view client. --action-horizon 0 reads the server horizon; "
+        MyG1InferenceConfig,
+        description="MY_G1 ego/second-view client. --action-horizon 0 reads the server horizon; "
         "an explicit horizon must match the server.",
     )
     main(config)

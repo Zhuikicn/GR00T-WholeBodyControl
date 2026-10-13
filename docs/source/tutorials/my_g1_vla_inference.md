@@ -1,6 +1,6 @@
 # MY_G1 VLA inference with SONIC
 
-`gear_sonic/scripts/run_my_g1_vla_inference.py` 是 Locomanip MY_G1 单 ego 相机模型的独立推理入口。它从 Isaac-GR00T PolicyServer 读取 checkpoint 的有效 modality 配置，向 SONIC C++ 发布 latent protocol v4 动作。
+`gear_sonic/scripts/run_my_g1_vla_inference.py` 是 Locomanip MY_G1 模型的独立推理入口。它从 Isaac-GR00T PolicyServer 读取 checkpoint 的有效 modality 配置，订阅 ego 相机，并按模型要求订阅实时渲染的 `second_view`，向 SONIC C++ 发布 latent protocol v4 动作。
 
 ## 运行环境与启动
 
@@ -17,7 +17,7 @@ python3 gear_sonic/scripts/my_launch.py \
     --prompt "pour water into the cup"
 ```
 
-相机服务仍需在机器人上运行并提供 `ego_view`，设置见 [Data collection](data_collection.md)。启动器不启动相机或仿真。`--model-path` 必须指向可由当前 Isaac-GR00T 环境加载的本地 checkpoint 目录；启动器不修改 checkpoint 配置。
+相机服务需在机器人上运行并提供 `ego_view`，设置见 [Data collection](data_collection.md)。需要 `second_view` 的模型还需单独运行下文的渲染程序。启动器负责服务器、C++ 和 client；相机与 second-view 渲染服务独立启动。`--model-path` 必须指向可由当前 Isaac-GR00T 环境加载的本地 checkpoint 目录。
 
 启动器本身只使用 Python 标准库和 tmux。服务器、客户端和键盘默认使用相邻 `Isaac-GR00T/.venv/bin/python`，无需 `.venv_inference` 或手动激活环境。可用 `--gr00t-root /path/to/Isaac-GR00T` 指定其他位置，该环境需同时具备客户端和服务器依赖。
 
@@ -115,17 +115,48 @@ PYTHONPATH=/home/xhchen/code/GR00T-WholeBodyControl \
 | --- | --- | --- |
 | PolicyServer | 5550 | REQ/REP：读取配置、请求动作 |
 | 相机 | 5555 | SUB：读取当前 ego RGB 帧 |
+| second_view 渲染 | 5560 | 模型需要时 SUB：读取最新白底机器人 RGB 帧 |
 | C++ 状态 | 5557 | SUB：读取 `g1_debug` |
 | C++ 动作 | 5556 | PUB：绑定地址，发送 `pose` / `command` |
 | 键盘发布器 | 5580 | SUB：接收控制键与 prompt |
 
 跨主机部署时，C++ 动作订阅地址必须指向客户端 PUB 的地址。`--action-zmq-host` 是客户端绑定地址，其余 host 选项是客户端连接地址。
 
+### 独立 second_view 渲染服务
+
+`gear_sonic/scripts/run_second_view_renderer.py` 订阅 C++ 的 `g1_debug`，使用身体、双手实测电机关节和 `[w,x,y,z]` 的 `base_quat` 重建机器人姿态，经 MuJoCo Warp 渲染后发布图像。进程执行姿态前向计算，独立于机器人的物理仿真和控制循环。
+
+渲染实现位于 `gear_sonic/utils/inference/second_view_renderer.py`。这是当前 Locomanip robot-only 渲染逻辑的独立副本，运行时依赖 SONIC 机器人资产。默认模型为 `gear_sonic/data/robot_model/model_data/g1/scene_43dof.xml`，相机参数独立保存在 `gear_sonic/config/second_view_camera.json`，供使用者维护。
+
+渲染环境需要 CUDA、PyTorch、MuJoCo 3.14.0、mujoco-warp 3.14.0、warp-lang 1.15.0，以及 NumPy、OpenCV、tyro、pyzmq、msgpack、msgpack-numpy。本机验证使用已有的 Locomanip `.venv`，该解释器提供渲染依赖；代码通过 `PYTHONPATH` 从 WBC 加载：
+
+```bash
+cd /home/xhchen/code/GR00T-WholeBodyControl
+PYTHONPATH=/home/xhchen/code/GR00T-WholeBodyControl \
+    /home/xhchen/code/humanoid-locomanip/.venv/bin/python \
+    -m gear_sonic.scripts.run_second_view_renderer \
+    --state-host 127.0.0.1 --state-port 5557 \
+    --publish-host 0.0.0.0 --publish-port 5560 \
+    --fps 50 --device cuda:0
+```
+
+可在具备上述依赖的独立环境运行同一命令。使用 `--model-path`、`--camera-config-path` 指定模型和相机参数。进程等待首个 state 后开始渲染，始终处理最新消息，目标发布频率默认 50 Hz，每 5 秒报告实际 FPS、渲染和 PNG 发布耗时。
+
+画面为 1280×720 白底机器人，使用当前合成数据的材质、灯光、纹理、阴影及单样本采样设置。相机内参为 `fx=fy=429.03129333391564`、主点 `(640,360)`；相机偏移 `(0.6,0,0.5)`、观察点偏移 `(0.1,0,0)`，水平偏移随机器人 yaw 旋转。根位置采用模型默认值，相机随根位置跟随。身体和双手按关节名字写入 MJCF，Dex3 电机顺序为 thumb、index、middle。
+
+发布消息沿用 `ImageMessageSchema`，图像键为 `second_view`，图像内容为 PNG bytes，通过单条 msgpack/ZMQ 消息传输。PNG 编码输入为 BGR，订阅器解码后恢复 RGB。时间戳 `timestamps.second_view` 表示渲染器收到源 state 的本机时间；`metadata.source_state_index` 标记源 state，`metadata.rendered_at` 表示渲染编码完成时间。
+
+client 的 `--second-view-host`、`--second-view-port` 默认 `localhost:5560`；跨主机部署时将 host 设为渲染主机地址。client 仅在服务器需要 `second_view` 时建立订阅。渲染服务可以与模型服务器使用不同主机或 GPU。
+
 ## 观测与动作约定
 
 客户端调用 `PolicyClient.get_modality_config()`，选择服务器需要的 state 与 language 字段。MY_G1 tag 定义 embodiment；checkpoint 保存的 processor 配置定义该模型的输入字段、字段拼接顺序与 horizon。部署时由服务器加载 checkpoint 配置。
 
-此入口提供当前帧 `video.ego_view`，形状为 `[1, 1, H, W, 3]`，使用 RGB；各 state 字段形状为 `[1, 1, D]`，language 字段为 `[[prompt]]`。支持的 state 字段为 `left_leg`、`right_leg`、`waist`、`left_arm`、`right_arm`、`left_hand`、`right_hand`、`projected_gravity`。服务器可选择其中的子集。入口使用 Locomanip 的单帧 ego 图像约定。
+此入口提供当前帧 `video.ego_view`，并按服务器配置提供 `video.second_view`。每路视频形状为 `[1, 1, H, W, 3]`，使用 RGB；各 state 字段形状为 `[1, 1, D]`，language 字段为 `[[prompt]]`。支持的 state 字段为 `left_leg`、`right_leg`、`waist`、`left_arm`、`right_arm`、`left_hand`、`right_hand`、`projected_gravity`。服务器可选择其中的子集。
+
+`second_view` 对应合成数据的白底机器人视频 `camera/second_person/rgb.mp4`，数据集存储键为 `observation.images.second_person`。带场景背景的 `third_view` 用于另一种视觉约定。
+
+双视角推理在所需图像和 state 首次到达后开始。ego、second_view 和关节 state 各自缓存最新样本，独立更新；client 采用当前最新关节 state，并与最近的渲染图像组合。图像订阅器沿用最新帧缓存行为，服务中断后可能重复使用缓存图像。此入口提供单帧视觉观测。
 
 `body_q` 按 G1 的 29 个电机关节顺序进入 RobotModel；左右 `hand_q` 使用各自独立的 7 个 Dex3 实测电机值。RobotModel 按关节名字得到各 state 字段。与 Locomanip MY_G1 导出文件相对应的 43 维原始 `observation.state` 存储顺序为：
 
@@ -145,7 +176,7 @@ PYTHONPATH=/home/xhchen/code/GR00T-WholeBodyControl \
 
 服务器输出每个动作块的 `motion_token [1, T, 64]`、`left_hand_joints [1, T, 7]` 和 `right_hand_joints [1, T, 7]`。它们分别来自训练数据的 `action.motion_token`、`action.left_hand` 和 `action.right_hand`。左右手动作顺序均为 **thumb 0, 1, 2; index 0, 1; middle 0, 1**，按此顺序直接发布。每个 protocol v4 pose 包包含一帧 64 维 token、左右 7 维手目标，以及递增的 frame index。token 的最大绝对值超过 1.25 时，当前推理结果被过滤。
 
-初始 pose 使用 `gear_sonic/utils/inference/initial_poses.py` 的 `LATENT_INITIAL_MOTION_TOKEN`。该文件、SONIC 部署模型及初始手目标依赖由使用者维护，并与数据合成时的 SONIC 配置匹配。
+初始 pose 使用 `gear_sonic/utils/inference/initial_poses_v1_1.py` 的 `LATENT_INITIAL_MOTION_TOKEN`。该文件、SONIC 部署模型及初始手目标依赖由使用者维护，并与数据合成时的 SONIC 配置匹配。
 
 ## 操作流程
 
@@ -169,10 +200,20 @@ PYTHONPATH=/home/xhchen/code/GR00T-WholeBodyControl \
 
 ## 本机验证
 
-验证使用隔离端口与本机 ZMQ 发布 / 订阅进程。真实 PolicyServer 搭配确定性 MY_G1 policy 的 horizon 为 8；观测顺序、动作逐值传输、暂停推理、键盘控制、prompt、初始 pose 和 horizon 匹配检查均通过。2.2 秒收到 110 条策略 pose，实测发布频率约 49.7 Hz。
+本机验证使用隔离端口、真实合成的 walking / approach / manipulation 姿态，以及本地 ZMQ 发布订阅进程。
 
-当前 Locomanip 合成 episode 的实际帧与导出 Parquet 对照：七组关节值完全一致，重力最大绝对误差约 `1.43e-8`；token 和手动作在 protocol v4 打包解包后完全一致。协议验证覆盖 Python 客户端与 ZMQ 通路。机器人稳定性与任务执行效果需要使用对应 SONIC 模型在部署环境验证。
+| 验证 | 实测结果 |
+| --- | --- |
+| 9 个姿态，与原 robot-only Warp 渲染使用相同固定根位置比较 | qpos 与 RGB 逐值完全一致 |
+| 50 Hz state 回放，398 帧 PNG | 全帧解码像素相同，稳定 49.52 FPS |
+| 源 state 发布至图像接收 | 中位 31.72 ms，P95 38.02 ms |
+| 渲染器收到 state 至图像接收 | 中位 16.78 ms，P95 19.11 ms |
+| 预热后的直接渲染 | 中位 2.93 ms，P95 3.26 ms |
+| 渲染进程 GPU 显存 | 790 MiB |
+| 单 ego、双视角等待、最新 state 与图像、horizon、键盘与动作播放 | 实际 PolicyServer / ZMQ 验证通过 |
 
-本地 `pour_water_no_third_374ep_bs64_seed5218_0.3drop` 权重通过实际观测的模型推理，返回 token `[1, 40, 64]` 和双手 `[1, 40, 7]`，所有值有限且 token 最大绝对值约 0.539。该 checkpoint 保存了当前本地 processor 构造函数无法读取的 `state_noise_std=0.02`，原路径直接加载会报错；这次模型验证使用 `/tmp` 下的 checkpoint 副本，设置本地 backbone 路径并省略该训练参数。正式部署应使用与 checkpoint 对应的 processor 版本。checkpoint 源文件保持原样。
+固定根位置与原 episode 根位置的参考图像比较，两个姿态分别有 14 和 11 个边缘像素出现浮点光线追踪差异；构图与相机跟随保持一致。
 
-完整客户端进程连接上述服务器，使用实际合成帧作为相机和状态来源，自动读取 horizon 40。恢复发布后 6 秒收到 295 条动作消息，实测约 49.74 Hz，帧号连续 `0–294`，18 个推理块成功，worker 错误为 0，所有 protocol v4 字段为有限值。该验证使用本机动作订阅进程接收客户端输出。
+实际双视角 checkpoint `pour_water_third_joint_bs64_seed5218_0.5drop` 使用新 renderer 和完整 client，服务器返回 `ego_view + second_view`、horizon 40。token `[1,40,64]` 和双手 `[1,40,7]` 全部为有限值；直接推理 token 最大绝对值约 0.496。恢复播放后 6 秒收到 286 条连续策略动作，约 48.98 Hz，12 个推理块，token 过滤跳过次数为 0。服务器验证使用临时本地 backbone 路径，checkpoint 原文件保持原样。进程正常退出。
+
+这些结果验证了渲染、通信和权重推理。机器人站立与任务效果需在对应 SONIC 部署环境验证。
