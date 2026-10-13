@@ -128,19 +128,27 @@ PYTHONPATH=/home/xhchen/code/GR00T-WholeBodyControl \
 
 渲染实现位于 `gear_sonic/utils/inference/second_view_renderer.py`。这是当前 Locomanip robot-only 渲染逻辑的独立副本，运行时依赖 SONIC 机器人资产。默认模型为 `gear_sonic/data/robot_model/model_data/g1/scene_43dof.xml`，相机参数独立保存在 `gear_sonic/config/second_view_camera.json`，供使用者维护。
 
-渲染环境需要 CUDA、PyTorch、MuJoCo 3.14.0、mujoco-warp 3.14.0、warp-lang 1.15.0，以及 NumPy、OpenCV、tyro、pyzmq、msgpack、msgpack-numpy。本机验证使用已有的 Locomanip `.venv`，该解释器提供渲染依赖；代码通过 `PYTHONPATH` 从 WBC 加载：
+渲染程序在具备 NVIDIA GPU 与驱动的主机上运行，只需要这台机器的 GR00T-WholeBodyControl 仓库。相机配置、Python 实现、MJCF 和 mesh 使用本仓库文件。渲染依赖由 `gear_sonic[second_view]` 声明：PyTorch 2.11.0、MuJoCo / mujoco-warp 3.14.0、warp-lang 1.15.0、headless OpenCV 及 ZMQ 消息依赖。
+
+在该机器的 WBC 仓库根目录安装环境。安装脚本使用 `uv` 创建或复用本仓库的 `.venv_second_view`，先安装 CUDA 12.8 版 PyTorch，再安装本地 package 及其依赖。NVIDIA 驱动需支持 CUDA 12.8：
 
 ```bash
-cd /home/xhchen/code/GR00T-WholeBodyControl
-PYTHONPATH=/home/xhchen/code/GR00T-WholeBodyControl \
-    /home/xhchen/code/humanoid-locomanip/.venv/bin/python \
+bash install_scripts/install_second_view.sh
+```
+
+然后从该仓库根目录启动。`--state-host` 指向 SONIC C++ 发布状态的主机地址；下面示例适用于 C++ 与渲染器在同一主机：
+
+```bash
+.venv_second_view/bin/python \
     -m gear_sonic.scripts.run_second_view_renderer \
     --state-host 127.0.0.1 --state-port 5557 \
     --publish-host 0.0.0.0 --publish-port 5560 \
     --fps 50 --device cuda:0
 ```
 
-可在具备上述依赖的独立环境运行同一命令。使用 `--model-path`、`--camera-config-path` 指定模型和相机参数。进程等待首个 state 后开始渲染，始终处理最新消息，目标发布频率默认 50 Hz，每 5 秒报告实际 FPS、渲染和 PNG 发布耗时。
+本地 editable package 安装提供 `gear_sonic` 模块，启动命令直接使用本仓库解释器。默认模型与相机路径相对已安装模块解析。使用 `--model-path`、`--camera-config-path` 指定模型和相机参数。进程等待首个 state 后开始渲染，始终处理最新消息，目标发布频率默认 50 Hz，每 5 秒报告实际 FPS、渲染和 PNG 发布耗时。
+
+渲染模块保存身体 29 个电机和每侧 Dex3 7 个电机的命名顺序，通过关节名称写入 MJCF。渲染环境独立于 client / PolicyServer 环境，提供该服务所需的 Python 依赖。
 
 画面为 1280×720 白底机器人，使用当前合成数据的材质、灯光、纹理、阴影及单样本采样设置。相机内参为 `fx=fy=429.03129333391564`、主点 `(640,360)`；相机偏移 `(0.6,0,0.5)`、观察点偏移 `(0.1,0,0)`，水平偏移随机器人 yaw 旋转。根位置采用模型默认值，相机随根位置跟随。身体和双手按关节名字写入 MJCF，Dex3 电机顺序为 thumb、index、middle。
 
@@ -201,6 +209,10 @@ client 的 `--second-view-host`、`--second-view-port` 默认 `localhost:5560`�
 ## 本机验证
 
 本机验证使用隔离端口、真实合成的 walking / approach / manipulation 姿态，以及本地 ZMQ 发布订阅进程。
+
+独立部署验证使用本仓库 `.venv_second_view`、PyTorch `2.11.0+cu128`，从 `/tmp` 以 Python `-I` 隔离模式运行。导入路径和已安装模块检查确认运行环境仅加载本仓库实现及渲染依赖。9 个姿态的 qpos 和 RGB 与参考结果逐值一致；50 Hz 回放收到 399 帧，PNG 解码全部一致，稳定 49.80 FPS，源 state 至图像接收延迟中位 20.07 ms、P95 25.72 ms，进程显存 790 MiB。结果保存在 `outputs/second_view_portability_20261013/`。
+
+完整 client 与 checkpoint 验证结果如下：
 
 | 验证 | 实测结果 |
 | --- | --- |

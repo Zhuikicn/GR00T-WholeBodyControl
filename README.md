@@ -65,6 +65,23 @@ This is the codebase for the **GR00T Whole-Body Control (WBC)** projects. It hos
 
 ## GEAR-SONIC 
 
+### MY_G1 second-view rendering
+
+Run the robot-only camera service from this checkout on an NVIDIA GPU machine:
+
+```bash
+bash install_scripts/install_second_view.sh
+.venv_second_view/bin/python -m gear_sonic.scripts.run_second_view_renderer \
+    --state-host <SONIC-CPP-IP>
+```
+
+The installer uses `uv` and creates `.venv_second_view` in this repository. The
+service reads C++ `g1_debug` state on port 5557 and publishes lossless RGB frames
+on port 5560. Configure the MY_G1 client with `--second-view-host <RENDERER-IP>`;
+the client subscribes when the checkpoint requires `second_view`. The renderer's
+code, camera configuration and robot assets are supplied by this repository.
+See [MY_G1 inference](docs/source/tutorials/my_g1_vla_inference.md) for setup and controls.
+
 <p style="font-size: 1.2em;">
     <a href="https://nvlabs.github.io/GEAR-SONIC/"><strong>Website</strong></a> | 
     <a href="https://huggingface.co/nvidia/GEAR-SONIC"><strong>Model</strong></a> | 

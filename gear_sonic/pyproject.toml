@@ -51,6 +51,19 @@ sim = [
     "msgpack-numpy",
     "opencv-python",
 ]
+# Standalone robot-only Warp rendering from C++ state.
+# Usage: pip install -e "gear_sonic[second_view]"
+second_view = [
+    "torch==2.11.0",
+    "mujoco==3.14.0",
+    "mujoco-warp==3.14.0",
+    "warp-lang==1.15.0",
+    "opencv-python-headless==4.11.0.86",
+    "tyro",
+    "pyzmq",
+    "msgpack",
+    "msgpack-numpy",
+]
 # Data collection: Sonic VLA data exporter with LeRobot dataset output
 # Usage: pip install -e "gear_sonic[data_collection]"
 data_collection = [

@@ -15,8 +15,39 @@ import numpy as np
 import torch
 import warp as wp
 
-from gear_sonic.data.robot_model.supplemental_info.g1.g1_supplemental_info import (
-    G1SupplementalInfo,
+BODY_JOINT_NAMES = (
+    "left_hip_pitch_joint",
+    "left_hip_roll_joint",
+    "left_hip_yaw_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_hip_pitch_joint",
+    "right_hip_roll_joint",
+    "right_hip_yaw_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+    "waist_yaw_joint",
+    "waist_roll_joint",
+    "waist_pitch_joint",
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint",
+)
+HAND_JOINT_SUFFIXES = (
+    "thumb_0", "thumb_1", "thumb_2", "index_0", "index_1", "middle_0", "middle_1",
 )
 
 
@@ -48,13 +79,12 @@ class SecondViewRenderer:
 
         self.data = mujoco.MjData(self.model)
         self.root_address = int(self.model.joint("floating_base_joint").qposadr[0])
-        info = G1SupplementalInfo()
         self.joint_addresses = {
             key: np.array([int(self.model.joint(name).qposadr[0]) for name in names])
             for key, names in (
-                ("body_q", info.body_actuated_joints),
-                ("left_hand_q", info.left_hand_actuated_joints),
-                ("right_hand_q", info.right_hand_actuated_joints),
+                ("body_q", BODY_JOINT_NAMES),
+                ("left_hand_q", [f"left_hand_{suffix}_joint" for suffix in HAND_JOINT_SUFFIXES]),
+                ("right_hand_q", [f"right_hand_{suffix}_joint" for suffix in HAND_JOINT_SUFFIXES]),
             )
         }
         self.camera_id = self.model.camera("second_view").id
