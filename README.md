@@ -65,7 +65,19 @@ This is the codebase for the **GR00T Whole-Body Control (WBC)** projects. It hos
 
 ## GEAR-SONIC 
 
-### MY_G1 second-view rendering
+### MY_G1_BINARY / MY_G1 inference and second-view rendering
+
+Launch the local policy server and SONIC client with a binary-hand checkpoint:
+
+```bash
+python3 gear_sonic/scripts/my_launch.py --model-path /path/to/binary_checkpoint
+```
+
+The default tag is `MY_G1_BINARY`. Select `--embodiment-tag MY_G1` for a
+continuous seven-joint hand checkpoint. The binary client classifies measured
+hand state at 30% closure and maps denormalized predictions at zero to open/close
+joint targets, with `thumb_0=0`. Both contracts use the existing seven-joint
+protocol and C++ hand driver with its 0.25-rad target-to-measured-position limit.
 
 Run the robot-only camera service from this checkout on an NVIDIA GPU machine:
 
@@ -77,10 +89,12 @@ bash install_scripts/install_second_view.sh
 
 The installer uses `uv` and creates `.venv_second_view` in this repository. The
 service reads C++ `g1_debug` state on port 5557 and publishes lossless RGB frames
-on port 5560. Configure the MY_G1 client with `--second-view-host <RENDERER-IP>`;
+on port 5560. Configure the client with `--second-view-host <RENDERER-IP>`;
 the client subscribes when the checkpoint requires `second_view`. The renderer's
 code, camera configuration and robot assets are supplied by this repository.
-See [MY_G1 inference](docs/source/tutorials/my_g1_vla_inference.md) for setup and controls.
+The client uses the server's effective video keys; `third_view` is a training
+auxiliary view filtered by the policy server.
+See [MY_G1_BINARY / MY_G1 inference](docs/source/tutorials/my_g1_vla_inference.md) for setup and controls.
 
 <p style="font-size: 1.2em;">
     <a href="https://nvlabs.github.io/GEAR-SONIC/"><strong>Website</strong></a> | 

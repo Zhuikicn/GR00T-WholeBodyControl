@@ -1,15 +1,16 @@
-"""MY_G1 VLA client with ego and optional second view for SONIC DDS deployment.
+"""MY_G1 and MY_G1_BINARY VLA client for SONIC DDS deployment.
 
 The policy server supplies the checkpoint's modality configuration and action
 horizon. Controls and action playback follow run_vla_inference; hand observations
-use the independent measured Dex3 joints. The initial motion token comes from
-the SONIC v1.1 initial-pose configuration.
+use measured Dex3 joints under the selected hand contract. The initial motion
+token comes from the SONIC v1.1 initial-pose configuration.
 """
 
 from dataclasses import dataclass
 import queue
 import threading
 import time
+from typing import Literal
 
 import numpy as np
 import tyro
@@ -19,7 +20,6 @@ from gear_sonic.camera.composed_camera import ComposedCameraClientSensor
 from gear_sonic.data.robot_model.instantiation.g1 import instantiate_g1_robot_model
 from gear_sonic.scripts.run_vla_inference import (
     InferenceConfig,
-    _compute_closed_hand_joints,
     _inference_worker_loop,
     _sleep_remaining,
     get_action_field,
@@ -31,6 +31,10 @@ from gear_sonic.utils.data_collection.keyboard_subscriber import ZMQKeyboardSubs
 from gear_sonic.utils.data_collection.telemetry import Telemetry
 from gear_sonic.utils.data_collection.transforms import compute_projected_gravity
 from gear_sonic.utils.data_collection.zmq_state_subscriber import ZMQStateSubscriber
+from gear_sonic.utils.inference.dex3_binary import (
+    hand_command_from_qpos,
+    hand_qpos_from_command,
+)
 from gear_sonic.utils.inference.initial_poses_v1_1 import LATENT_INITIAL_MOTION_TOKEN
 from gear_sonic.utils.inference.vla_utils import (
     calculate_latency_compensated_index,
@@ -42,9 +46,9 @@ from gear_sonic.utils.teleop.zmq.zmq_planner_sender import build_command_message
 
 @dataclass
 class MyG1InferenceConfig(InferenceConfig):
-    """MY_G1 policy and independent second-view camera endpoints."""
+    """Select the hand contract and independent second-view camera endpoints."""
 
-    embodiment_tag: str = "my_g1"
+    embodiment_tag: Literal["my_g1_binary", "my_g1", "MY_G1_BINARY", "MY_G1"] = "my_g1_binary"
     action_horizon: int = 0
     """Read the server horizon with 0; an explicit horizon must match the server."""
 
@@ -63,11 +67,13 @@ def prepare_observation_from_sensors(
     modality_configs,
     log_errors: bool = False,
     second_view_subscriber=None,
+    binary_hands: bool = False,
 ):
-    """Assemble the server's MY_G1 state and language fields at the current frame.
+    """Assemble the server's state and language fields at the current frame.
 
     RobotModel maps the measured body and Dex3 motor arrays to joint-group order.
-    Hand state follows index, middle, thumb, matching Locomanip's MY_G1 exporter.
+    MY_G1 hand state follows index, middle, thumb. MY_G1_BINARY hand state is
+    a signed command classified from measured thumb-first motor angles.
     Video has shape ``[1, 1, H, W, 3]`` and each state has shape ``[1, 1, D]``.
     Each stream keeps its latest sample independently. Returns None while a
     required image or robot-state stream is being acquired.
@@ -114,6 +120,12 @@ def prepare_observation_from_sensors(
     observation["state"]["projected_gravity"] = compute_projected_gravity(
         state_msg["base_quat"]
     )[np.newaxis, np.newaxis]
+    if binary_hands:
+        for side in ("left", "right"):
+            observation["state"][f"{side}_hand"] = np.asarray(
+                hand_command_from_qpos(state_msg[f"{side}_hand_q"], side),
+                dtype=np.float32,
+            ).reshape(1, 1, 1)
     observation["state"] = {
         key: observation["state"][key] for key in modality_configs["state"].modality_keys
     }
@@ -137,14 +149,25 @@ def main(config: MyG1InferenceConfig):
         print("WARNING: PolicyServer not reachable. Inference will fail until server is up.")
 
     modality_configs = n1_policy.get_modality_config()
+    binary_hands = config.embodiment_tag.lower() == "my_g1_binary"
+    hand_action_suffix = "close" if binary_hands else "joints"
+    expected_action_keys = {
+        "motion_token", f"left_hand_{hand_action_suffix}", f"right_hand_{hand_action_suffix}",
+    }
+    action_keys = set(modality_configs["action"].modality_keys)
+    if action_keys != expected_action_keys:
+        raise ValueError(
+            f"{config.embodiment_tag} requires action keys {sorted(expected_action_keys)}; "
+            f"PolicyServer provides {sorted(action_keys)}"
+        )
     server_horizon = len(modality_configs["action"].delta_indices)
     if config.action_horizon and config.action_horizon != server_horizon:
         raise ValueError(
             f"action_horizon={config.action_horizon} differs from server horizon={server_horizon}"
         )
     config.action_horizon = server_horizon
-    print_green(f"MY_G1 state keys: {modality_configs['state'].modality_keys}")
-    print_green(f"MY_G1 action horizon: {server_horizon}")
+    print_green(f"{config.embodiment_tag.upper()} state keys: {modality_configs['state'].modality_keys}")
+    print_green(f"{config.embodiment_tag.upper()} action horizon: {server_horizon}")
 
     state_subscriber = ZMQStateSubscriber(
         host=config.state_zmq_host,
@@ -189,16 +212,8 @@ def main(config: MyG1InferenceConfig):
     def publish_initial_pose():
         """Publish initial pose command to move robot to starting position."""
         print("Moving to initial pose")
-        left_hand = (
-            _compute_closed_hand_joints("L")
-            if initial_pose_left_hand_closed
-            else np.zeros(7, dtype=np.float32)
-        )
-        right_hand = (
-            _compute_closed_hand_joints("R")
-            if initial_pose_right_hand_closed
-            else np.zeros(7, dtype=np.float32)
-        )
+        left_hand = hand_qpos_from_command(1 if initial_pose_left_hand_closed else -1, "left")
+        right_hand = hand_qpos_from_command(1 if initial_pose_right_hand_closed else -1, "right")
         zmq_message = pack_latent_action_message(
             motion_token=LATENT_INITIAL_MOTION_TOKEN,
             frame_index=np.array([0], dtype=np.int64),
@@ -228,16 +243,8 @@ def main(config: MyG1InferenceConfig):
         num_steps = max(1, round(config.action_publish_rate * duration_s))
         step_period = 1.0 / config.action_publish_rate
 
-        left_hand = (
-            _compute_closed_hand_joints("L")
-            if initial_pose_left_hand_closed
-            else np.zeros(7, dtype=np.float32)
-        )
-        right_hand = (
-            _compute_closed_hand_joints("R")
-            if initial_pose_right_hand_closed
-            else np.zeros(7, dtype=np.float32)
-        )
+        left_hand = hand_qpos_from_command(1 if initial_pose_left_hand_closed else -1, "left")
+        right_hand = hand_qpos_from_command(1 if initial_pose_right_hand_closed else -1, "right")
 
         print(
             f"Blending to initial pose over {duration_s:.2f}s "
@@ -400,6 +407,7 @@ def main(config: MyG1InferenceConfig):
                 modality_configs=modality_configs,
                 log_errors=True,
                 second_view_subscriber=second_view_subscriber,
+                binary_hands=binary_hands,
             ),
             lambda obs: run_policy_inference_and_process(
                 policy=n1_policy,
@@ -423,6 +431,15 @@ def main(config: MyG1InferenceConfig):
                 action_chunk_index = calculate_latency_compensated_index(
                     inference_delay, config.action_publish_rate, config.action_horizon
                 )
+                if binary_hands and processed_action is not None:
+                    for side in ("left", "right"):
+                        prediction = np.asarray(
+                            get_action_field(processed_action, f"{side}_hand_close"),
+                            dtype=np.float32,
+                        ).squeeze(axis=-1)
+                        processed_action[f"{side}_hand_joints"] = hand_qpos_from_command(
+                            np.where(prediction >= 0., 1, -1), side
+                        ).astype(np.float32)
                 cached_action_chunk = processed_action
                 last_inference_time = time.monotonic()
                 print_green(
@@ -545,7 +562,8 @@ def main(config: MyG1InferenceConfig):
 if __name__ == "__main__":
     config = tyro.cli(
         MyG1InferenceConfig,
-        description="MY_G1 ego/second-view client. --action-horizon 0 reads the server horizon; "
+        description="MY_G1_BINARY / MY_G1 ego/second-view client. "
+        "--action-horizon 0 reads the server horizon; "
         "an explicit horizon must match the server.",
     )
     main(config)

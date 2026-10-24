@@ -1,4 +1,4 @@
-"""Launch the local MY_G1 inference stack in tmux (camera runs externally)."""
+"""Launch the MY_G1_BINARY / MY_G1 inference stack in tmux (camera runs externally)."""
 
 import argparse
 import os
@@ -17,7 +17,11 @@ SCRIPT_PATH = Path(__file__).resolve()
 def make_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--model-path", required=True, type=Path, help="Local MY_G1 checkpoint directory"
+        "--model-path", required=True, type=Path, help="Local checkpoint directory for the selected tag"
+    )
+    parser.add_argument(
+        "--embodiment-tag", choices=("MY_G1_BINARY", "MY_G1"), default="MY_G1_BINARY",
+        help="Hand contract used by the checkpoint and client (default: MY_G1_BINARY)",
     )
     parser.add_argument("--gr00t-root", type=Path, default=REPO_ROOT.parent / "Isaac-GR00T")
     parser.add_argument("--device", default="cuda:0")
@@ -82,7 +86,7 @@ def build_commands(config, repo_root=REPO_ROOT, script_path=SCRIPT_PATH):
                 "--model-path",
                 model_path,
                 "--embodiment-tag",
-                "MY_G1",
+                config.embodiment_tag,
                 "--device",
                 config.device,
                 "--host",
@@ -121,7 +125,7 @@ def build_commands(config, repo_root=REPO_ROOT, script_path=SCRIPT_PATH):
                 "--port",
                 config.policy_port,
                 "--embodiment-tag",
-                "my_g1",
+                config.embodiment_tag.lower(),
                 "--action-horizon",
                 "0",
                 "--state-zmq-host",
@@ -262,7 +266,7 @@ def wait_for_server(port, timeout=300):
                     socket.send(msgpack.packb({"endpoint": "ping"}))
                     response = msgpack.unpackb(socket.recv(), raw=False)
                     if isinstance(response, dict) and response.get("status") == "ok":
-                        print("PolicyServer ready; starting MY_G1 client.", flush=True)
+                        print("PolicyServer ready; starting SONIC VLA client.", flush=True)
                         return
                 except zmq.Again:
                     continue
@@ -399,7 +403,7 @@ def main(argv=None):
         else:
             check_prerequisites(config)
             create_session(config.session, commands)
-            print("MY_G1 stack launched. Top: server | C++; bottom: client | keyboard.")
+            print(f"{config.embodiment_tag} stack launched. Top: server | C++; bottom: client | keyboard.")
             print("In the C++ pane, confirm deploy.sh with Enter and wait for initialization.")
             print(
                 "When the client is ready, enter k, then i in the keyboard pane; once stable, enter p."

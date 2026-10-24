@@ -1,6 +1,6 @@
-# MY_G1 VLA inference with SONIC
+# MY_G1_BINARY / MY_G1 VLA inference with SONIC
 
-`gear_sonic/scripts/run_my_g1_vla_inference.py` 是 Locomanip MY_G1 模型的独立推理入口。它从 Isaac-GR00T PolicyServer 读取 checkpoint 的有效 modality 配置，订阅 ego 相机，并按模型要求订阅实时渲染的 `second_view`，向 SONIC C++ 发布 latent protocol v4 动作。
+`gear_sonic/scripts/run_my_g1_vla_inference.py` 支持 `MY_G1_BINARY` 二值手部模型与 `MY_G1` 连续关节角模型，默认采用 `MY_G1_BINARY`。它从 Isaac-GR00T PolicyServer 读取 checkpoint 的有效 modality 配置，订阅 ego 相机，并按模型要求订阅实时渲染的 `second_view`，向 SONIC C++ 发布 latent protocol v4 动作。手部转换与端点位于本仓库 `gear_sonic/utils/inference/dex3_binary.py`，部署时使用本仓库的代码和机器人资产。
 
 ## 运行环境与启动
 
@@ -8,7 +8,7 @@
 
 ### 一键启动本机推理
 
-在 WBC 仓库根目录运行小型启动器，启动本机模型服务器、C++、MY_G1 客户端和键盘发布器：
+在 WBC 仓库根目录运行小型启动器，启动本机模型服务器、C++、推理客户端和键盘发布器：
 
 ```bash
 python3 gear_sonic/scripts/my_launch.py \
@@ -16,6 +16,18 @@ python3 gear_sonic/scripts/my_launch.py \
     --camera-host 192.168.123.164 \
     --prompt "pour water into the cup"
 ```
+
+默认 tag 为 `MY_G1_BINARY`。使用连续关节角模型时，显式选择 `MY_G1`：
+
+```bash
+python3 gear_sonic/scripts/my_launch.py \
+    --model-path /path/to/my_g1_checkpoint \
+    --embodiment-tag MY_G1 \
+    --camera-host 192.168.123.164 \
+    --prompt "pour water into the cup"
+```
+
+启动器向 PolicyServer 和客户端传递相同的 tag。checkpoint 必须具有对应的训练契约；客户端在启动时检查服务器动作字段与所选 tag 一致，然后才连接机器人状态、相机和动作通道。
 
 相机服务需在机器人上运行并提供 `ego_view`，设置见 [Data collection](data_collection.md)。需要 `second_view` 的模型还需单独运行下文的渲染程序。启动器负责服务器、C++ 和 client；相机与 second-view 渲染服务独立启动。`--model-path` 必须指向可由当前 Isaac-GR00T 环境加载的本地 checkpoint 目录。
 
@@ -27,7 +39,7 @@ python3 gear_sonic/scripts/my_launch.py \
 | --- | --- |
 | 左上 | PolicyServer，默认 `cuda:0`、本机端口 `5550` |
 | 右上 | SONIC C++，默认 v1.1 模型，先加载 `scripts/setup_env.sh` |
-| 左下 | MY_G1 客户端，等待服务器协议 ping 成功后启动 |
+| 左下 | MY_G1_BINARY / MY_G1 客户端，等待服务器协议 ping 成功后启动 |
 | 右下 | 键盘发布器，在这里输入键名后回车 |
 
 启动后先在右上 C++ 窗格按回车确认 `deploy.sh`，等待 C++ 初始化和客户端就绪。随后在右下键盘窗格输入 `k` 回车、`i` 回车，确认初始姿态稳定，再输入 `p` 回车。启动器不自动发送这些控制键。输入 `t 新指令` 更新后续推理的 prompt。
@@ -65,7 +77,7 @@ tmux kill-session -t '=my_g1_inference'
 cd /home/xhchen/code/Isaac-GR00T
 .venv/bin/python -m gr00t.eval.run_gr00t_server \
     --model-path /path/to/checkpoint \
-    --embodiment-tag MY_G1 \
+    --embodiment-tag MY_G1_BINARY \
     --device cuda:0 --host 0.0.0.0 --port 5550
 ```
 
@@ -109,7 +121,7 @@ PYTHONPATH=/home/xhchen/code/GR00T-WholeBodyControl \
     --prompt "pour water into the cup"
 ```
 
-`--help` 列出网络与控制选项。客户端默认 `--action-horizon 0`，表示从服务器 `action.delta_indices` 自动取得 horizon。显式设置正数时，该数值必须与服务器一致。默认动作发布频率为 50 Hz，推理请求频率为 2.5 Hz。
+`--help` 列出网络与控制选项。客户端默认 `--embodiment-tag my_g1_binary`；使用旧模型时将服务器 tag 设为 `MY_G1`，客户端增加 `--embodiment-tag my_g1`。客户端也接受大写 tag。默认 `--action-horizon 0`，表示从服务器 `action.delta_indices` 自动取得 horizon。显式设置正数时，该数值必须与服务器一致。默认动作发布频率为 50 Hz，推理请求频率为 2.5 Hz。
 
 | 通路 | 默认端口 | 客户端行为 |
 | --- | --- | --- |
@@ -158,11 +170,11 @@ client 的 `--second-view-host`、`--second-view-port` 默认 `localhost:5560`�
 
 ## 观测与动作约定
 
-客户端调用 `PolicyClient.get_modality_config()`，选择服务器需要的 state 与 language 字段。MY_G1 tag 定义 embodiment；checkpoint 保存的 processor 配置定义该模型的输入字段、字段拼接顺序与 horizon。部署时由服务器加载 checkpoint 配置。
+客户端调用 `PolicyClient.get_modality_config()`，选择服务器需要的 state 与 language 字段。所选 tag 定义手部契约；checkpoint 保存的 processor 配置定义该模型的输入字段、字段拼接顺序与 horizon。部署时由服务器加载 checkpoint 配置。
 
 此入口提供当前帧 `video.ego_view`，并按服务器配置提供 `video.second_view`。每路视频形状为 `[1, 1, H, W, 3]`，使用 RGB；各 state 字段形状为 `[1, 1, D]`，language 字段为 `[[prompt]]`。支持的 state 字段为 `left_leg`、`right_leg`、`waist`、`left_arm`、`right_arm`、`left_hand`、`right_hand`、`projected_gravity`。服务器可选择其中的子集。
 
-`second_view` 对应合成数据的白底机器人视频 `camera/second_person/rgb.mp4`，数据集存储键为 `observation.images.second_person`。带场景背景的 `third_view` 用于另一种视觉约定。
+`second_view` 对应合成数据的白底机器人视频 `camera/second_person/rgb.mp4`，数据集存储键为 `observation.images.second_person`。`third_view` 是训练辅助输入，当前 PolicyServer 会从推理所需的视觉字段中移除它。客户端遵循服务器返回的有效字段，使用 ego 与模型需要的 second_view。
 
 双视角推理在所需图像和 state 首次到达后开始。ego、second_view 和关节 state 各自缓存最新样本，独立更新；client 采用当前最新关节 state，并与最近的渲染图像组合。图像订阅器沿用最新帧缓存行为，服务中断后可能重复使用缓存图像。此入口提供单帧视觉观测。
 
@@ -182,7 +194,28 @@ client 的 `--second-view-host`、`--second-view-port` 默认 `localhost:5560`�
 
 `base_quat` 为 `[w, x, y, z]`，客户端归一化后将世界重力 `[0, 0, -1]` 投影到机体坐标，得到 `projected_gravity`。
 
-服务器输出每个动作块的 `motion_token [1, T, 64]`、`left_hand_joints [1, T, 7]` 和 `right_hand_joints [1, T, 7]`。它们分别来自训练数据的 `action.motion_token`、`action.left_hand` 和 `action.right_hand`。左右手动作顺序均为 **thumb 0, 1, 2; index 0, 1; middle 0, 1**，按此顺序直接发布。每个 protocol v4 pose 包包含一帧 64 维 token、左右 7 维手目标，以及递增的 frame index。token 的最大绝对值超过 1.25 时，当前推理结果被过滤。
+两种契约的模型字段如下。维度表示使用完整身体与 gravity 时的有效维度，拼接顺序由 checkpoint 的命名字段决定。
+
+| 契约 | 每手 state | state 总维度（含 gravity） | 每手模型 action | action 总维度 |
+| --- | --- | --- | --- | --- |
+| MY_G1 | 七维实测角，index / middle / thumb 顺序 | 46 | `left_hand_joints` / `right_hand_joints`，各 `[1,T,7]` | 78 |
+| MY_G1_BINARY | 一维实测闭合状态 −1/+1 | 34 | `left_hand_close` / `right_hand_close`，各 `[1,T,1]` | 66 |
+
+MY_G1 的服务器动作是连续关节角，客户端直接发送。MY_G1_BINARY 的训练标签为 −1/+1，服务器仍返回反归一化后的连续浮点值；客户端逐帧以 `>=0` 判闭合 `+1`，其余判开启 `-1`，再展开为七维端点。两种模型的 motion token 都为 `[1,T,64]`，双手与 token 使用同一动作块索引，沿用现有延迟补偿与逐帧播放。
+
+二值观测由原始 Dex3 实测电机角计算。每侧按 **thumb 0, 1, 2; index 0, 1; middle 0, 1** 排列，令 `d=q_close-q_open`，计算 `r=dot(q-q_open,d)/dot(d,d)`；`r>=0.30` 为 `+1`，其余为 `-1`。state 的 30% 阈值与模型输出的零阈值各自作用于对应阶段。
+
+共享端点单位为 rad：
+
+```text
+open        = [0,  0,    0,    0,  0,    0,  0]
+left_close  = [0,  0.7,  0.7, -1, -1.5, -1, -1.5]
+right_close = [0, -0.7, -0.7,  1,  1.5,  1,  1.5]
+```
+
+这组端点参考 pour_water 遥操作 `action.wbc`；两侧开合时 `thumb_0=0`。初始 pose 与键盘开合同样使用这组端点，初始双手默认张开。
+
+每个 protocol v4 pose 包包含一帧 64 维 token、左右 7 维手目标，以及递增的 frame index。七维手目标按 thumb / index / middle 顺序发送。目标与实测位置的限差由 SONIC C++ 的 Dex3 writer 执行，当前为 **0.25 rad**；Python 客户端负责动作语义转换。token 的最大绝对值超过 1.25 时，当前推理结果被过滤。
 
 初始 pose 使用 `gear_sonic/utils/inference/initial_poses_v1_1.py` 的 `LATENT_INITIAL_MOTION_TOKEN`。该文件、SONIC 部署模型及初始手目标依赖由使用者维护，并与数据合成时的 SONIC 配置匹配。
 
@@ -207,6 +240,21 @@ client 的 `--second-view-host`、`--second-view-port` 默认 `localhost:5560`�
 `p` 与 Ctrl+C 管理客户端，C++ 的停止由 `k` 或部署端的停止操作控制。机器人站立由 SONIC C++ controller 执行，客户端提供初始 token 与后续策略目标。
 
 ## 本机验证
+
+双契约验证使用录制的机器人状态与 RGB 图像回放，以及可控 PolicyServer；客户端运行完整异步推理与动作发布循环，所有端口均为本机隔离端口。
+
+| 验证组合 | 核对的策略动作包 |
+| --- | --- |
+| MY_G1 / ego_view | 140 |
+| MY_G1 / ego_view + second_view | 139 |
+| MY_G1_BINARY / ego_view | 138 |
+| MY_G1_BINARY / ego_view + second_view | 137 |
+
+554 条策略动作逐包解码，motion token 与两手使用同一时间索引，手部 wire shape 均为 `[1,7]`。MY_G1 观测与连续动作逐值匹配原契约；BINARY 覆盖 30% state 边界、正负与零预测值、左右手独立开合、初始手姿、暂停恢复。所选 tag 与服务器动作字段不匹配时，在连接相机和动作通道前报错。默认 BINARY 与显式 MY_G1 的启动命令检查通过。
+
+验证从 `/tmp` 启动，只将 WBC 仓库加入客户端模块路径；导入检查确认没有加载 humanoid-locomanip。原始 `run_vla_inference.py` 与 C++ 文件的校验值保持一致。数值、日志、回放输入和发送消息保存在 `outputs/my_g1_binary_inference_20261024/`。该验证覆盖通信与契约转换；使用的 PolicyServer 返回受控动作，真实 checkpoint 推理及真机任务效果分别需要相应环境验证。
+
+### MY_G1 权重与 second_view 渲染验证
 
 本机验证使用隔离端口、真实合成的 walking / approach / manipulation 姿态，以及本地 ZMQ 发布订阅进程。
 
