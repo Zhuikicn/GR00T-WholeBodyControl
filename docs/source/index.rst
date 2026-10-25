@@ -132,6 +132,7 @@ Documentation
 
    references/index
    user_guide/configuration
+   user_guide/g1_appearance
    references/conventions
    references/training_code
    references/deployment_code
