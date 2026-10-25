@@ -69,6 +69,32 @@ tmux attach -t '=my_g1_inference'
 tmux kill-session -t '=my_g1_inference'
 ```
 
+### 记录 action chunk 和推理耗时
+
+在 `my_launch.py` 启动命令中增加 `--inference-log-path outputs/inference/session.jsonl` 即可记录，例如：
+
+```bash
+python3 gear_sonic/scripts/my_launch.py \
+    --model-path /path/to/checkpoint \
+    --camera-host 192.168.123.164 \
+    --prompt "pour water into the bowl" \
+    --inference-log-path outputs/inference/session.jsonl
+```
+
+`launch_inference.py`、`run_vla_inference.py` 和 `run_my_g1_vla_inference.py` 同样支持此参数；默认关闭。目录自动创建，同一文件追加写入，每次启动通过 `session_id` 区分。独立写入线程逐条 flush，退出时排空日志队列；磁盘错误或队列积压会明确告警。
+
+每次请求对应一行 JSON，包含 UTC 请求/响应时间、`request_id`、实际请求的 `language`（prompt）、server 返回的完整 `action` 和各字段 `action_shapes`、完整 `info`，以及：
+
+| 字段 | 含义 |
+| --- | --- |
+| `client_round_trip_ms` | 客户端 `get_action` 调用耗时，包含序列化、网络往返、服务端排队、策略执行和响应解码 |
+| `info.server_policy_ms` | 服务端 `policy.get_action` 耗时，包含前后处理和校验，不包含网络和响应序列化；需重启更新后的 Isaac-GR00T server |
+| `processing_ms` | 客户端成功处理返回动作的耗时 |
+| `total_ms` | 本次客户端请求及处理总耗时，不含日志复制、序列化和写盘 |
+| `status` | `ok`、`rejected`（动作越界）或 `error`（请求/处理异常） |
+
+越界 chunk 也保留完整返回内容；失败请求记录 `error` 与 `total_ms`。旧 server 仍可使用，日志中只是没有 `server_policy_ms`。记录发生在过滤 `task_progress`、动作拼接和延迟补偿选帧之前，因此保存的是完整原始 chunk，不能据此认定每帧动作都已执行。原有终端 `New action chunk ... latency` 还包含处理和结果队列等待时间，与请求往返耗时口径不同。日志不录制相机图像。
+
 ### 手动分终端启动
 
 在 GPU 主机的 Isaac-GR00T 环境启动模型服务器：

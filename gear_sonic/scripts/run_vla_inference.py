@@ -42,6 +42,7 @@ from gear_sonic.utils.data_collection.telemetry import Telemetry
 from gear_sonic.utils.data_collection.transforms import compute_projected_gravity
 from gear_sonic.utils.data_collection.zmq_state_subscriber import ZMQStateSubscriber
 from gear_sonic.utils.inference.initial_poses_v1_1 import LATENT_INITIAL_MOTION_TOKEN
+from gear_sonic.utils.inference.inference_recorder import InferenceRecorder, utc_timestamp
 from gear_sonic.utils.inference.vla_utils import (
     calculate_latency_compensated_index,
     concat_action,
@@ -123,6 +124,9 @@ class InferenceConfig:
     # Debug
     verbose_timing: bool = False
     """Whether to always print timing info (not just when loop is slow)."""
+
+    inference_log_path: str | None = None
+    """Append raw action chunks, response info and request timings to this JSONL file."""
 
 
 def print_green(x):
@@ -275,17 +279,41 @@ def prepare_observation_from_sensors(
     return observation
 
 
-def run_policy_inference_and_process(policy, observation, robot_model):
+def run_policy_inference_and_process(policy, observation, robot_model, recorder=None):
     """Run policy inference via Isaac-GR00T PolicyClient and process results.
 
     Returns:
         processed_action dict or None on error.
     """
+    record = None
+    if recorder is not None:
+        record = {
+            "request_id": time.monotonic_ns(),
+            "timestamp_utc": utc_timestamp(),
+            "language": observation.get("language", {}),
+            "status": "error",
+        }
+    started = time.perf_counter()
     try:
-        action, _info = policy.get_action(observation)
+        if recorder is None:
+            action, info = policy.get_action(observation)
+        else:
+            action, info = policy.get_action(observation, options={"record_timing": True})
+        received = time.perf_counter()
+        if record is not None:
+            record.update(
+                client_round_trip_ms=(received - started) * 1000,
+                response_timestamp_utc=utc_timestamp(),
+                action=action,
+                action_shapes={key: list(np.shape(value)) for key, value in action.items()},
+                info=info,
+            )
 
-        action.pop("task_progress", None)
-        action.pop("action.task_progress", None)
+        action = {
+            key: value
+            for key, value in action.items()
+            if key not in ("task_progress", "action.task_progress")
+        }
 
         motion_key = "motion_token" if "motion_token" in action else "action.motion_token"
         if np.abs(action[motion_key]).max() > 1.25:
@@ -294,16 +322,26 @@ def run_policy_inference_and_process(policy, observation, robot_model):
                 f"({np.abs(action[motion_key]).max():.4f}) > 1.25. "
                 "Exceeds action bound, skipping."
             )
+            if record is not None:
+                record.update(status="rejected", reason="motion_token_out_of_bounds")
             return None
 
         processed_action = concat_action(robot_model, action)
+        if record is not None:
+            record.update(status="ok", processing_ms=(time.perf_counter() - received) * 1000)
         return processed_action
     except Exception as e:
+        if record is not None:
+            record["error"] = f"{type(e).__name__}: {e}"
         print(f"Error in inference: {e}")
         import traceback
 
         traceback.print_exc()
         return None
+    finally:
+        if record is not None:
+            record["total_ms"] = (time.perf_counter() - started) * 1000
+            recorder.record(**record)
 
 
 def _inference_worker_loop(
@@ -612,6 +650,8 @@ def main(config: InferenceConfig):
     inference_stop_event = threading.Event()
     inference_busy_event = threading.Event()
 
+    recorder = InferenceRecorder(config.inference_log_path) if config.inference_log_path else None
+
     inference_worker_thread = threading.Thread(
         target=_inference_worker_loop,
         args=(
@@ -630,6 +670,7 @@ def main(config: InferenceConfig):
                 policy=n1_policy,
                 observation=obs,
                 robot_model=robot_model,
+                recorder=recorder,
             ),
         ),
         daemon=True,
@@ -756,7 +797,9 @@ def main(config: InferenceConfig):
 
     finally:
         inference_stop_event.set()
-        inference_worker_thread.join(timeout=1.0)
+        inference_worker_thread.join(timeout=n1_policy.timeout_ms / 1000 + 1 if recorder else 1.0)
+        if recorder is not None:
+            recorder.close()
         zmq_socket.close()
         zmq_context.term()
         state_subscriber.close()

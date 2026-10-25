@@ -36,6 +36,7 @@ from gear_sonic.utils.inference.dex3_binary import (
     hand_qpos_from_command,
 )
 from gear_sonic.utils.inference.initial_poses_v1_1 import LATENT_INITIAL_MOTION_TOKEN
+from gear_sonic.utils.inference.inference_recorder import InferenceRecorder
 from gear_sonic.utils.inference.vla_utils import (
     calculate_latency_compensated_index,
     prepare_observation_for_eval,
@@ -392,6 +393,8 @@ def main(config: MyG1InferenceConfig):
     inference_stop_event = threading.Event()
     inference_busy_event = threading.Event()
 
+    recorder = InferenceRecorder(config.inference_log_path) if config.inference_log_path else None
+
     inference_worker_thread = threading.Thread(
         target=_inference_worker_loop,
         args=(
@@ -413,6 +416,7 @@ def main(config: MyG1InferenceConfig):
                 policy=n1_policy,
                 observation=obs,
                 robot_model=robot_model,
+                recorder=recorder,
             ),
         ),
         daemon=True,
@@ -548,7 +552,9 @@ def main(config: MyG1InferenceConfig):
 
     finally:
         inference_stop_event.set()
-        inference_worker_thread.join(timeout=1.0)
+        inference_worker_thread.join(timeout=n1_policy.timeout_ms / 1000 + 1 if recorder else 1.0)
+        if recorder is not None:
+            recorder.close()
         zmq_socket.close()
         zmq_context.term()
         state_subscriber.close()

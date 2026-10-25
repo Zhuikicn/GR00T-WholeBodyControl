@@ -26,6 +26,11 @@ def make_parser():
     parser.add_argument("--gr00t-root", type=Path, default=REPO_ROOT.parent / "Isaac-GR00T")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--prompt", default="demo")
+    parser.add_argument(
+        "--inference-log-path",
+        type=Path,
+        help="Append raw action chunks and inference timings to this JSONL file",
+    )
     parser.add_argument("--camera-host", default="192.168.123.164")
     parser.add_argument("--camera-port", type=int, default=5555)
     parser.add_argument(
@@ -138,6 +143,10 @@ def build_commands(config, repo_root=REPO_ROOT, script_path=SCRIPT_PATH):
                 config.camera_host,
                 "--camera-port",
                 config.camera_port,
+                *(
+                    ["--inference-log-path", config.inference_log_path.expanduser().resolve()]
+                    if config.inference_log_path is not None else []
+                ),
                 "--prompt",
                 config.prompt,
             ],

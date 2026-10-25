@@ -35,6 +35,7 @@ Usage (from repo root — no venv activation needed):
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -137,6 +138,9 @@ class InferenceLaunchConfig:
 
     action_horizon: int = 40
     """Action horizon of the VLA policy."""
+
+    inference_log_path: str | None = None
+    """Append raw action chunks and request timings to this JSONL file."""
 
     # Camera
     camera_host: str = "localhost"
@@ -396,6 +400,9 @@ def main(config: InferenceLaunchConfig):
         f"--camera-host {config.camera_host} "
         f"--camera-port {config.camera_port}"
     )
+
+    if config.inference_log_path:
+        inference_cmd += f" --inference-log-path {shlex.quote(config.inference_log_path)}"
 
     print("Starting VLA inference (pane 1)...")
     _send_to_pane(2, inference_cmd, wait=1.0)
