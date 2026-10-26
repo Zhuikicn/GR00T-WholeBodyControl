@@ -1,6 +1,7 @@
 """Launch the MY_G1_BINARY / MY_G1 inference stack in tmux (camera runs externally)."""
 
 import argparse
+import math
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,19 @@ def make_parser():
     parser.add_argument("--gr00t-root", type=Path, default=REPO_ROOT.parent / "Isaac-GR00T")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--prompt", default="demo")
+    parser.add_argument(
+        "--rtc", action="store_true", help="Enable RTC prefix conditioning (updated server required)"
+    )
+    parser.add_argument(
+        "--rtc-execution-steps",
+        type=int,
+        default=0,
+        help="Request at this chunk index; 0 uses half the server horizon",
+    )
+    parser.add_argument(
+        "--rtc-delay-ms", type=float, default=100.0, help="RTC prefix freeze delay budget in milliseconds"
+    )
+    parser.add_argument("--rtc-ramp-rate", type=float, default=5.0, help="RTC overlap exponential ramp rate")
     parser.add_argument(
         "--inference-log-path",
         type=Path,
@@ -143,6 +157,19 @@ def build_commands(config, repo_root=REPO_ROOT, script_path=SCRIPT_PATH):
                 config.camera_host,
                 "--camera-port",
                 config.camera_port,
+                *(
+                    [
+                        "--rtc",
+                        "--rtc-execution-steps",
+                        config.rtc_execution_steps,
+                        "--rtc-delay-ms",
+                        config.rtc_delay_ms,
+                        "--rtc-ramp-rate",
+                        config.rtc_ramp_rate,
+                    ]
+                    if config.rtc
+                    else []
+                ),
                 *(
                     ["--inference-log-path", config.inference_log_path.expanduser().resolve()]
                     if config.inference_log_path is not None else []
@@ -385,6 +412,11 @@ def attach(session):
 def main(argv=None):
     parser = make_parser()
     config = parser.parse_args(argv)
+    if config.rtc_execution_steps < 0:
+        parser.error("--rtc-execution-steps must be nonnegative")
+    for name in ("rtc_delay_ms", "rtc_ramp_rate"):
+        if not math.isfinite(getattr(config, name)) or getattr(config, name) <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be finite and positive")
     if not re.fullmatch(r"[A-Za-z0-9_-]+", config.session):
         parser.error("--session must contain only letters, digits, underscores or hyphens")
     for name in ("camera_port", "policy_port"):

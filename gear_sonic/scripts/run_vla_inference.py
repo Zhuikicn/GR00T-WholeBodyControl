@@ -41,8 +41,8 @@ from gear_sonic.utils.data_collection.keyboard_subscriber import (
 from gear_sonic.utils.data_collection.telemetry import Telemetry
 from gear_sonic.utils.data_collection.transforms import compute_projected_gravity
 from gear_sonic.utils.data_collection.zmq_state_subscriber import ZMQStateSubscriber
-from gear_sonic.utils.inference.initial_poses_v1_1 import LATENT_INITIAL_MOTION_TOKEN
 from gear_sonic.utils.inference.inference_recorder import InferenceRecorder, utc_timestamp
+from gear_sonic.utils.inference.initial_poses_v1_1 import LATENT_INITIAL_MOTION_TOKEN
 from gear_sonic.utils.inference.vla_utils import (
     calculate_latency_compensated_index,
     concat_action,
@@ -279,7 +279,9 @@ def prepare_observation_from_sensors(
     return observation
 
 
-def run_policy_inference_and_process(policy, observation, robot_model, recorder=None):
+def run_policy_inference_and_process(
+    policy, observation, robot_model, recorder=None, *, options=None, request_metadata=None
+):
     """Run policy inference via Isaac-GR00T PolicyClient and process results.
 
     Returns:
@@ -293,12 +295,21 @@ def run_policy_inference_and_process(policy, observation, robot_model, recorder=
             "language": observation.get("language", {}),
             "status": "error",
         }
+        if request_metadata is not None:
+            record.update(
+                event_type="rtc_request",
+                request_id=request_metadata["request_id"],
+                rtc={k: v for k, v in request_metadata.items() if k != "started"},
+            )
     started = time.perf_counter()
     try:
-        if recorder is None:
+        request_options = dict(options or {})
+        if recorder is not None:
+            request_options["record_timing"] = True
+        if not request_options:
             action, info = policy.get_action(observation)
         else:
-            action, info = policy.get_action(observation, options={"record_timing": True})
+            action, info = policy.get_action(observation, options=request_options)
         received = time.perf_counter()
         if record is not None:
             record.update(
@@ -308,6 +319,25 @@ def run_policy_inference_and_process(policy, observation, robot_model, recorder=
                 action_shapes={key: list(np.shape(value)) for key, value in action.items()},
                 info=info,
             )
+
+        if request_options.get("rtc", {}).get("enabled"):
+            from gear_sonic.utils.inference.rtc import RTCUnsupportedError
+
+            acknowledgement = info.get("rtc", {})
+            expected_prefix = "previous_actions" in request_options["rtc"]
+            if acknowledgement.get("supported") is not True or acknowledgement.get("applied") != expected_prefix:
+                raise RTCUnsupportedError(
+                    "PolicyServer did not acknowledge RTC. Restart with the updated Isaac-GR00T "
+                    "server/model, or disable --rtc."
+                )
+            if request_metadata is not None and record is not None:
+                record["rtc"]["delay_budget_exceeded"] = (
+                    time.monotonic() - request_metadata["started"]
+                ) * 1000 > request_metadata["delay_budget_ms"]
+            for key, value in action.items():
+                array = np.asarray(value)
+                if array.ndim != 3 or array.shape[0] != 1 or not np.isfinite(array).all():
+                    raise ValueError(f"Invalid RTC response field {key}: expected finite (1, T, D)")
 
         action = {
             key: value
@@ -334,6 +364,13 @@ def run_policy_inference_and_process(policy, observation, robot_model, recorder=
         if record is not None:
             record["error"] = f"{type(e).__name__}: {e}"
         print(f"Error in inference: {e}")
+        if options and options.get("rtc", {}).get("enabled"):
+            from gear_sonic.utils.inference.rtc import RTCUnsupportedError
+
+            if isinstance(e, RTCUnsupportedError):
+                raise
+            if "RTC is not supported by this model/action head" in str(e):
+                raise RTCUnsupportedError(str(e)) from e
         import traceback
 
         traceback.print_exc()

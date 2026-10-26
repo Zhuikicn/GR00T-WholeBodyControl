@@ -7,6 +7,7 @@ token comes from the SONIC v1.1 initial-pose configuration.
 """
 
 from dataclasses import dataclass
+import math
 import queue
 import threading
 import time
@@ -35,8 +36,9 @@ from gear_sonic.utils.inference.dex3_binary import (
     hand_command_from_qpos,
     hand_qpos_from_command,
 )
-from gear_sonic.utils.inference.initial_poses_v1_1 import LATENT_INITIAL_MOTION_TOKEN
 from gear_sonic.utils.inference.inference_recorder import InferenceRecorder
+from gear_sonic.utils.inference.initial_poses_v1_1 import LATENT_INITIAL_MOTION_TOKEN
+from gear_sonic.utils.inference.rtc import RTCPlayback, RTCSettings, rtc_worker_loop
 from gear_sonic.utils.inference.vla_utils import (
     calculate_latency_compensated_index,
     prepare_observation_for_eval,
@@ -58,6 +60,18 @@ class MyG1InferenceConfig(InferenceConfig):
 
     second_view_port: int = 5560
     """Second-view camera server port, used when the policy requires second_view."""
+
+    rtc: bool = False
+    """Enable RTC prefix conditioning; requires the updated Isaac-GR00T server."""
+
+    rtc_execution_steps: int = 0
+    """Request next chunk at this index; 0 uses half the server action horizon."""
+
+    rtc_delay_ms: float = 100.0
+    """Inference delay budget used to freeze the RTC prefix (milliseconds)."""
+
+    rtc_ramp_rate: float = 5.0
+    """Exponential ramp rate for updates to the unfrozen overlap region."""
 
 
 def prepare_observation_from_sensors(
@@ -136,6 +150,13 @@ def prepare_observation_from_sensors(
 def main(config: MyG1InferenceConfig):
     pause_loop = True
 
+    if config.rtc:
+        for name in ("rtc_delay_ms", "rtc_ramp_rate", "action_publish_rate"):
+            if not math.isfinite(getattr(config, name)) or getattr(config, name) <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        if config.rtc_execution_steps < 0:
+            raise ValueError("rtc_execution_steps must be nonnegative")
+
     robot_model = instantiate_g1_robot_model(waist_location="lower_and_upper_body")
 
     # Isaac-GR00T PolicyClient
@@ -163,10 +184,24 @@ def main(config: MyG1InferenceConfig):
         )
     server_horizon = len(modality_configs["action"].delta_indices)
     if config.action_horizon and config.action_horizon != server_horizon:
-        raise ValueError(
-            f"action_horizon={config.action_horizon} differs from server horizon={server_horizon}"
-        )
+        raise ValueError(f"action_horizon={config.action_horizon} differs from server horizon={server_horizon}")
     config.action_horizon = server_horizon
+    rtc_settings = (
+        RTCSettings(
+            server_horizon,
+            config.action_publish_rate,
+            config.rtc_execution_steps,
+            config.rtc_delay_ms,
+            config.rtc_ramp_rate,
+        )
+        if config.rtc
+        else None
+    )
+    if rtc_settings is not None:
+        print_green(
+            f"RTC enabled: request at index {rtc_settings.execution_threshold}, "
+            f"freeze {rtc_settings.frozen_steps} frames; --rate is ignored"
+        )
     print_green(f"{config.embodiment_tag.upper()} state keys: {modality_configs['state'].modality_keys}")
     print_green(f"{config.embodiment_tag.upper()} action horizon: {server_horizon}")
 
@@ -300,12 +335,19 @@ def main(config: MyG1InferenceConfig):
     cached_action_chunk = None
     action_chunk_index = 0
     last_inference_time = 0.0
-    inference_interval = 1.0 / config.rate
+    inference_interval = 0.0 if config.rtc else 1.0 / config.rate
 
     zmq_frame_counter = 0
     last_sent_motion_token: np.ndarray | None = None
 
     PROMPT_MSG_PREFIX = "prompt:"
+
+    def reset_rtc(reason):
+        nonlocal cached_action_chunk, action_chunk_index
+        if rtc_playback is not None:
+            rtc_playback.invalidate(reason)
+            cached_action_chunk = None
+            action_chunk_index = 0
 
     def check_keyboard_input():
         nonlocal pause_loop, cpp_loop_running, cpp_mode
@@ -322,6 +364,7 @@ def main(config: MyG1InferenceConfig):
             if new_prompt:
                 old_prompt = language_prompt_ref[0]
                 language_prompt_ref[0] = new_prompt
+                reset_rtc("prompt_changed")
                 print_green(f'Inference prompt changed: "{old_prompt}" -> "{new_prompt}"')
             else:
                 print("Received empty prompt change -- ignoring.")
@@ -334,6 +377,7 @@ def main(config: MyG1InferenceConfig):
         elif key == "f":
             print("Keyboard: 'f' (stop recording failure -- handled by data exporter)")
         elif key == "i":
+            reset_rtc("initial_pose")
             if cpp_loop_running and cpp_mode == "PLANNER":
                 if send_cpp_control_command(start=True, planner=False):
                     print("Switched to POSE mode (from PLANNER mode)")
@@ -354,6 +398,7 @@ def main(config: MyG1InferenceConfig):
             print("Cleared cached action chunk, reset frame counter")
         elif key == "p":
             pause_loop = not pause_loop
+            reset_rtc("paused" if pause_loop else "resumed")
             print(f"{'Paused' if pause_loop else 'Resumed'} policy loop")
             if pause_loop:
                 print("Policy loop paused (C++ loop still running - press 'k' to stop)")
@@ -364,6 +409,9 @@ def main(config: MyG1InferenceConfig):
                 current_planner = cpp_mode == "PLANNER"
                 print(f"Stopping C++ control loop (from {cpp_mode} mode)...")
                 if send_cpp_control_command(start=False, planner=current_planner):
+                    if config.rtc:
+                        pause_loop = True
+                        reset_rtc("cpp_stopped")
                     print("Stopped C++ control loop")
             else:
                 print("Starting C++ control loop in PLANNER mode...")
@@ -394,33 +442,58 @@ def main(config: MyG1InferenceConfig):
     inference_busy_event = threading.Event()
 
     recorder = InferenceRecorder(config.inference_log_path) if config.inference_log_path else None
+    rtc_playback = RTCPlayback(rtc_settings, recorder) if rtc_settings is not None else None
 
-    inference_worker_thread = threading.Thread(
-        target=_inference_worker_loop,
-        args=(
-            inference_queue,
-            result_queue,
-            inference_stop_event,
-            inference_busy_event,
-            lambda: prepare_observation_from_sensors(
-                camera_subscriber=camera_subscriber,
-                state_subscriber=state_subscriber,
-                robot_model=robot_model,
-                language_prompt=language_prompt_ref[0],
-                modality_configs=modality_configs,
-                log_errors=True,
-                second_view_subscriber=second_view_subscriber,
-                binary_hands=binary_hands,
+    def prepare_obs(prompt):
+        return prepare_observation_from_sensors(
+            camera_subscriber=camera_subscriber,
+            state_subscriber=state_subscriber,
+            robot_model=robot_model,
+            language_prompt=prompt,
+            modality_configs=modality_configs,
+            log_errors=True,
+            second_view_subscriber=second_view_subscriber,
+            binary_hands=binary_hands,
+        )
+
+    if rtc_playback is not None:
+        inference_worker_thread = threading.Thread(
+            target=rtc_worker_loop,
+            args=(
+                inference_queue,
+                result_queue,
+                inference_stop_event,
+                rtc_playback,
+                prepare_obs,
+                lambda obs, options, metadata: run_policy_inference_and_process(
+                    policy=n1_policy,
+                    observation=obs,
+                    robot_model=robot_model,
+                    recorder=recorder,
+                    options=options,
+                    request_metadata=metadata,
+                ),
             ),
-            lambda obs: run_policy_inference_and_process(
-                policy=n1_policy,
-                observation=obs,
-                robot_model=robot_model,
-                recorder=recorder,
+            daemon=True,
+        )
+    else:
+        inference_worker_thread = threading.Thread(
+            target=_inference_worker_loop,
+            args=(
+                inference_queue,
+                result_queue,
+                inference_stop_event,
+                inference_busy_event,
+                lambda: prepare_obs(language_prompt_ref[0]),
+                lambda obs: run_policy_inference_and_process(
+                    policy=n1_policy,
+                    observation=obs,
+                    robot_model=robot_model,
+                    recorder=recorder,
+                ),
             ),
-        ),
-        daemon=True,
-    )
+            daemon=True,
+        )
     inference_worker_thread.start()
 
     try:
@@ -430,11 +503,20 @@ def main(config: MyG1InferenceConfig):
 
             # Consume result first so last_inference_time is fresh before trigger check
             try:
-                processed_action, inference_start_time = result_queue.get_nowait()
-                inference_delay = time.monotonic() - inference_start_time
-                action_chunk_index = calculate_latency_compensated_index(
-                    inference_delay, config.action_publish_rate, config.action_horizon
-                )
+                result = result_queue.get_nowait()
+                if rtc_playback is not None:
+                    accepted = rtc_playback.accept(result)
+                    if accepted is None:
+                        # No usable replacement; keep playing the previous chunk.
+                        raise queue.Empty
+                    processed_action, action_chunk_index = accepted
+                    inference_delay = time.monotonic() - result["metadata"]["started"]
+                else:
+                    processed_action, inference_start_time = result
+                    inference_delay = time.monotonic() - inference_start_time
+                    action_chunk_index = calculate_latency_compensated_index(
+                        inference_delay, config.action_publish_rate, config.action_horizon
+                    )
                 if binary_hands and processed_action is not None:
                     for side in ("left", "right"):
                         prediction = np.asarray(
@@ -442,30 +524,34 @@ def main(config: MyG1InferenceConfig):
                             dtype=np.float32,
                         ).squeeze(axis=-1)
                         processed_action[f"{side}_hand_joints"] = hand_qpos_from_command(
-                            np.where(prediction >= 0., 1, -1), side
+                            np.where(prediction >= 0.0, 1, -1), side
                         ).astype(np.float32)
                 cached_action_chunk = processed_action
                 last_inference_time = time.monotonic()
                 print_green(
-                    f'New action chunk (prompt: "{language_prompt_ref[0]}", '
-                    f"latency: {inference_delay:.3f}s)"
+                    f'New action chunk (prompt: "{language_prompt_ref[0]}", latency: {inference_delay:.3f}s)'
                 )
             except queue.Empty:
                 pass
 
-            worker_is_busy = inference_busy_event.is_set()
-            should_start = should_trigger_new_inference(
-                cached_chunk_exists=(cached_action_chunk is not None),
-                inference_thread_running=worker_is_busy,
-                time_since_last_inference=(time.monotonic() - last_inference_time),
-                inference_interval=inference_interval,
-            )
+            if rtc_playback is not None:
+                request = rtc_playback.reserve(language_prompt_ref[0], paused=pause_loop)
+                if request is not None:
+                    inference_queue.put_nowait(request)
+            else:
+                worker_is_busy = inference_busy_event.is_set()
+                should_start = should_trigger_new_inference(
+                    cached_chunk_exists=(cached_action_chunk is not None),
+                    inference_thread_running=worker_is_busy,
+                    time_since_last_inference=(time.monotonic() - last_inference_time),
+                    inference_interval=inference_interval,
+                )
 
-            if should_start:
-                try:
-                    inference_queue.put_nowait(None)
-                except queue.Full:
-                    pass
+                if should_start:
+                    try:
+                        inference_queue.put_nowait(None)
+                    except queue.Full:
+                        pass
 
             if pause_loop:
                 print("Pausing...", end="", flush=True)
@@ -507,7 +593,11 @@ def main(config: MyG1InferenceConfig):
                         right_hand_joints = right_hand_joints[0]
 
                     horizon = motion_token.shape[0] if motion_token.ndim == 2 else 1
-                    current_idx = min(action_chunk_index, horizon - 1)
+                    current_idx = (
+                        rtc_playback.playback_index()
+                        if rtc_playback is not None
+                        else min(action_chunk_index, horizon - 1)
+                    )
 
                     if motion_token.ndim == 2:
                         motion_token = motion_token[current_idx]
@@ -526,12 +616,12 @@ def main(config: MyG1InferenceConfig):
                         right_hand_joints=right_hand_joints,
                     )
                     zmq_socket.send(zmq_message)
+                    if rtc_playback is not None:
+                        rtc_playback.published()
                     last_sent_motion_token = motion_token.copy()
                     if zmq_frame_counter % 50 == 0:
                         print_green(
-                            f"ZMQ: Sent latent action - "
-                            f"frame: {frame_index[0]}, "
-                            f"token shape: {motion_token.shape}"
+                            f"ZMQ: Sent latent action - frame: {frame_index[0]}, token shape: {motion_token.shape}"
                         )
 
                 action_chunk_index = min(action_chunk_index + 1, config.action_horizon - 1)
@@ -540,10 +630,8 @@ def main(config: MyG1InferenceConfig):
 
             if config.verbose_timing:
                 telemetry.log_timing_info(context="VLA Inference Loop", threshold=0.0)
-            elif (end_time - t_start) > (1 / config.rate):
-                telemetry.log_timing_info(
-                    context="VLA Inference Loop Missed", threshold=0.001
-                )
+            elif not config.rtc and (end_time - t_start) > (1 / config.rate):
+                telemetry.log_timing_info(context="VLA Inference Loop Missed", threshold=0.001)
 
             _sleep_remaining(t_start, loop_period)
 
@@ -552,9 +640,11 @@ def main(config: MyG1InferenceConfig):
 
     finally:
         inference_stop_event.set()
-        inference_worker_thread.join(timeout=n1_policy.timeout_ms / 1000 + 1 if recorder else 1.0)
+        inference_worker_thread.join(timeout=n1_policy.timeout_ms / 1000 + 1 if recorder or config.rtc else 1.0)
         if recorder is not None:
             recorder.close()
+        if config.rtc and not inference_worker_thread.is_alive():
+            n1_policy.close()
         zmq_socket.close()
         zmq_context.term()
         state_subscriber.close()
